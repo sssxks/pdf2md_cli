@@ -1,10 +1,12 @@
 import argparse
 import base64
+import concurrent.futures
+import glob
 import os
 import sys
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Callable
+from typing import Callable, Dict, Optional, Tuple
 import threading
 import time
 
@@ -201,17 +203,25 @@ def convert_pdf_to_markdown(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert a PDF to Markdown using Mistral OCR, saving the Markdown and extracted images "
-            "into an output folder."
+            "Convert one or more PDFs to Markdown using Mistral OCR. Images are saved alongside "
+            "the produced markdown files. Batch runs are processed concurrently."
         )
     )
-    parser.add_argument("pdf_file", type=Path, help="Path to input PDF file")
+    parser.add_argument(
+        "pdf_files",
+        nargs="+",
+        help="One or more PDF files to process (supports glob patterns, e.g. docs/*.pdf)",
+    )
     parser.add_argument(
         "-o",
         "--outdir",
         type=Path,
         default=None,
-        help="Output directory (default: <PDF_DIR>/<PDF_STEM>_ocr)",
+        help=(
+            "Output directory. For a single file, this is the exact output folder. "
+            "For multiple files, this folder is used as a base and each file writes to "
+            "<outdir>/<pdf_stem>_ocr. Default: <PDF_DIR>/<PDF_STEM>_ocr"
+        ),
     )
     parser.add_argument(
         "--api-key",
@@ -219,30 +229,104 @@ def main() -> None:
         default=None,
         help="Mistral API key (or set MISTRAL_API_KEY env var)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of concurrent workers (default: min(4, number of files))",
+    )
 
     args = parser.parse_args()
 
-    pdf_path: Path = args.pdf_file
-    if not pdf_path.exists():
-        _error(f"Input file not found: {pdf_path}")
-        sys.exit(2)
+    def _expand_inputs(inputs: list[str]) -> list[Path]:
+        files: list[Path] = []
+        errors: list[str] = []
 
-    outdir: Path = args.outdir or (pdf_path.parent / f"{pdf_path.stem}_ocr")
+        for raw in inputs:
+            pattern = os.path.expanduser(raw)
+            if any(ch in pattern for ch in "*?["):
+                matches = [Path(m) for m in glob.glob(pattern, recursive=True)]
+                if not matches:
+                    errors.append(f"No files match pattern: {raw}")
+                else:
+                    files.extend(matches)
+            else:
+                files.append(Path(pattern))
+
+        if errors:
+            for msg in errors:
+                _error(msg)
+            sys.exit(2)
+
+        return files
+
+    pdf_files = _expand_inputs(args.pdf_files)
+    missing = [p for p in pdf_files if not p.exists()]
+    if missing:
+        for p in missing:
+            _error(f"Input file not found: {p}")
+        sys.exit(2)
 
     api_key = _load_api_key(args.api_key)
 
-    spinner = _Spinner(enabled=True)
-    try:
-        spinner.start("Starting...")
-        md_path, _ = convert_pdf_to_markdown(pdf_path, outdir, api_key, progress=spinner.update)
-        spinner.stop(clear=True)
-    except Exception as e:
-        spinner.stop(clear=True)
-        _error(str(e))
-        sys.exit(1)
+    # Single-file path: keep spinner UX
+    if len(pdf_files) == 1:
+        pdf_path = pdf_files[0]
+        outdir: Path = args.outdir or (pdf_path.parent / f"{pdf_path.stem}_ocr")
 
-    # Minimal success output: print only the markdown file path to stdout
-    print(str(md_path))
+        spinner = _Spinner(enabled=True)
+        try:
+            spinner.start("Starting...")
+            md_path, _ = convert_pdf_to_markdown(pdf_path, outdir, api_key, progress=spinner.update)
+            spinner.stop(clear=True)
+        except Exception as e:
+            spinner.stop(clear=True)
+            _error(str(e))
+            sys.exit(1)
+
+        print(str(md_path))
+        return
+
+    # Batch path: concurrent processing
+    base_outdir = args.outdir
+    max_workers = args.workers or min(4, len(pdf_files))
+
+    def _outdir_for(pdf: Path) -> Path:
+        if base_outdir:
+            return base_outdir / f"{pdf.stem}_ocr"
+        return pdf.parent / f"{pdf.stem}_ocr"
+
+    def _task(pdf: Path) -> Tuple[Path, Optional[str]]:
+        try:
+            outdir = _outdir_for(pdf)
+            md_path, _ = convert_pdf_to_markdown(pdf, outdir, api_key)
+            return md_path, None
+        except Exception as e:  # noqa: BLE001
+            return pdf, str(e)
+
+    results: list[Tuple[Path, Optional[str]]] = [None] * len(pdf_files)  # type: ignore[assignment]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_idx = {
+            pool.submit(_task, pdf): idx for idx, pdf in enumerate(pdf_files)
+        }
+        for future in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:  # pragma: no cover - defensive
+                results[idx] = (pdf_files[idx], str(e))
+
+    failed = False
+    for (pdf, maybe_err), original_pdf in zip(results, pdf_files):
+        if maybe_err is None:
+            print(str(pdf))
+        else:
+            failed = True
+            _error(f"Failed to process {original_pdf}: {maybe_err}")
+
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
