@@ -32,19 +32,17 @@ def _load_api_key(cli_key: Optional[str]) -> str:
     return key
 
 
-def _upload_pdf(pdf_path: Path, api_key: str) -> str:
-    client = Mistral(api_key=api_key)
+def _upload_pdf(pdf_path: Path, client: Mistral) -> Tuple[str, str]:
     content = pdf_path.read_bytes()
     uploaded_file = client.files.upload(
         file={"file_name": pdf_path.name, "content": content},
         purpose="ocr",
     )
     signed_url = client.files.get_signed_url(file_id=uploaded_file.id)
-    return signed_url.url
+    return uploaded_file.id, signed_url.url
 
 
-def _process_ocr(document_url: str, api_key: str):
-    client = Mistral(api_key=api_key)
+def _process_ocr(document_url: str, client: Mistral):
     return client.ocr.process(
         model="mistral-ocr-2505",
         document={"type": "document_url", "document_url": document_url},
@@ -170,18 +168,28 @@ def convert_pdf_to_markdown(
 
     _ensure_outdir(outdir)
 
-    # 1) Upload and get signed URL
-    if progress:
-        progress("Uploading PDF...")
-    doc_url = _upload_pdf(pdf_file, api_key)
+    client = Mistral(api_key=api_key)
+    uploaded_file_id: Optional[str] = None
 
-    # 2) OCR
     try:
+        # 1) Upload and get signed URL
+        if progress:
+            progress("Uploading PDF...")
+        uploaded_file_id, doc_url = _upload_pdf(pdf_file, client)
+
+        # 2) OCR
         if progress:
             progress("Running OCR (this can take a while)...")
-        ocr_response = _process_ocr(doc_url, api_key)
+        ocr_response = _process_ocr(doc_url, client)
     except Exception as e:
         raise RuntimeError(f"OCR processing failed: {e}")
+    finally:
+        # Best-effort cleanup: the uploaded file is only needed for the OCR call.
+        if uploaded_file_id:
+            try:
+                client.files.delete(file_id=uploaded_file_id)
+            except Exception as e:
+                _error(f"Warning: failed to delete uploaded file {uploaded_file_id}: {e}")
 
     # 3) Join page markdown
     markdown_text = "\n\n".join(page.markdown for page in ocr_response.pages).strip()
