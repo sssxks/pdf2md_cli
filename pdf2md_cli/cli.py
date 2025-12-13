@@ -241,7 +241,7 @@ def main() -> None:
         "--workers",
         type=int,
         default=None,
-        help="Number of concurrent workers (default: min(4, number of files))",
+        help="Number of concurrent workers (default: min(16, number of files))",
     )
 
     args = parser.parse_args()
@@ -297,7 +297,7 @@ def main() -> None:
 
     # Batch path: concurrent processing
     base_outdir = args.outdir
-    max_workers = args.workers or min(4, len(pdf_files))
+    max_workers = args.workers or min(16, len(pdf_files))
 
     def _outdir_for(pdf: Path) -> Path:
         if base_outdir:
