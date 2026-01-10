@@ -1,214 +1,23 @@
+from __future__ import annotations
+
 import argparse
-import base64
 import concurrent.futures
-import glob
-import os
 import sys
-from io import BytesIO
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
-import threading
-import time
+from typing import Optional, Tuple
 
-from mistralai import Mistral
-from PIL import Image
+from pdf2md_cli.auth import error, load_api_key
+from pdf2md_cli.backends.mistral import make_mistral_runner
+from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
+from pdf2md_cli.inputs import expand_inputs, validate_pdf_paths
+from pdf2md_cli.pipeline import convert_pdf_to_markdown
+from pdf2md_cli.retry import BackoffConfig
+from pdf2md_cli.ui import Spinner
 
-VALID_DOCUMENT_EXTENSIONS = {".pdf"}
-
-
-def _error(msg: str) -> None:
-    print(f"Error: {msg}", file=sys.stderr)
-
-
-def _ensure_outdir(outdir: Path) -> None:
-    outdir.mkdir(parents=True, exist_ok=True)
+DEFAULT_OCR_MODEL = "mistral-ocr-2505"
 
 
-def _load_api_key(cli_key: Optional[str]) -> str:
-    key = (cli_key or "").strip() or os.environ.get("MISTRAL_API_KEY", "").strip()
-    if not key:
-        _error("Mistral API key not provided. Use --api-key or set MISTRAL_API_KEY env var.")
-        sys.exit(2)
-    return key
-
-
-def _upload_pdf(pdf_path: Path, client: Mistral) -> Tuple[str, str]:
-    content = pdf_path.read_bytes()
-    uploaded_file = client.files.upload(
-        file={"file_name": pdf_path.name, "content": content},
-        purpose="ocr",
-    )
-    signed_url = client.files.get_signed_url(file_id=uploaded_file.id)
-    return uploaded_file.id, signed_url.url
-
-
-def _process_ocr(document_url: str, client: Mistral):
-    return client.ocr.process(
-        model="mistral-ocr-2505",
-        document={"type": "document_url", "document_url": document_url},
-        include_image_base64=True,
-    )
-
-
-def _decode_and_save_images(ocr_response, outdir: Path, stem: str) -> Dict[str, str]:
-    """Save images to disk and return a map from image id -> saved filename.
-
-    Images are saved next to the markdown file as: {stem}_image_XXX.png
-    """
-    id_to_filename: Dict[str, str] = {}
-    img_counter = 1
-
-    for page in ocr_response.pages:
-        for img in page.images:
-            filename = f"image_{img_counter:03d}.png"
-            img_counter += 1
-            out_path = outdir / filename
-
-            if not getattr(img, "image_base64", None):
-                # No base64 content available; skip but keep a placeholder mapping
-                id_to_filename[img.id] = filename
-                continue
-
-            base64_str = img.image_base64
-            if "," in base64_str:
-                # Strip data URL prefix if any
-                base64_str = base64_str.split(",", 1)[1]
-
-            try:
-                img_bytes = base64.b64decode(base64_str)
-                pil = Image.open(BytesIO(img_bytes)).convert("RGBA")
-                pil.save(out_path, format="PNG")
-                id_to_filename[img.id] = filename
-            except Exception as e:
-                _error(f"Failed to decode/save image {img.id}: {e}")
-                id_to_filename[img.id] = filename  # still map so markdown link resolves to a path
-
-    return id_to_filename
-
-
-def _rewrite_markdown(markdown_text: str, id_to_filename: Dict[str, str]) -> str:
-    # Replace occurrences of ![<id>](<id>) with ![<id>](<filename>)
-    rewritten = markdown_text
-    for img_id, fname in id_to_filename.items():
-        rewritten = rewritten.replace(f"![{img_id}]({img_id})", f"![{fname}]({fname})")
-    return rewritten
-
-
-class _Spinner:
-    """A simple spinner that writes transient progress to stderr.
-
-    - Uses a background thread to animate while long operations run.
-    - update(msg) changes the message shown next to the spinner.
-    - stop(clear=True) stops and clears the line to avoid clutter.
-    """
-
-    _glyphs = "|/-\\"
-
-    def __init__(self, enabled: bool = True) -> None:
-        self.enabled = enabled and sys.stderr.isatty()
-        self._msg = ""
-        self._running = False
-        self._t: Optional[threading.Thread] = None
-
-    def start(self, msg: str) -> None:
-        if not self.enabled:
-            return
-        self._msg = msg
-        self._running = True
-        self._t = threading.Thread(target=self._run, daemon=True)
-        self._t.start()
-
-    def update(self, msg: str) -> None:
-        if not self.enabled:
-            return
-        self._msg = msg
-
-    def stop(self, clear: bool = True) -> None:
-        if not self.enabled:
-            return
-        self._running = False
-        if self._t:
-            self._t.join(timeout=1.0)
-        if clear:
-            self._clear_line()
-
-    def _run(self) -> None:
-        i = 0
-        while self._running:
-            ch = self._glyphs[i % len(self._glyphs)]
-            line = f"\r{self._msg} {ch}"
-            try:
-                sys.stderr.write(line)
-                sys.stderr.flush()
-            except Exception:
-                # If writing fails, disable spinner to avoid crash
-                self.enabled = False
-                return
-            time.sleep(0.1)
-            i += 1
-
-    def _clear_line(self) -> None:
-        try:
-            # Overwrite the current line with spaces and return carriage
-            cols = 120
-            sys.stderr.write("\r" + (" " * cols) + "\r")
-            sys.stderr.flush()
-        except Exception:
-            pass
-
-
-def convert_pdf_to_markdown(
-    pdf_file: Path,
-    outdir: Path,
-    api_key: str,
-    progress: Optional[Callable[[str], None]] = None,
-) -> Tuple[Path, Dict[str, str]]:
-    if pdf_file.suffix.lower() not in VALID_DOCUMENT_EXTENSIONS:
-        raise ValueError(f"Unsupported file type: {pdf_file.suffix}. Only PDFs are supported.")
-
-    _ensure_outdir(outdir)
-
-    client = Mistral(api_key=api_key)
-    uploaded_file_id: Optional[str] = None
-
-    try:
-        # 1) Upload and get signed URL
-        if progress:
-            progress("Uploading PDF...")
-        uploaded_file_id, doc_url = _upload_pdf(pdf_file, client)
-
-        # 2) OCR
-        if progress:
-            progress("Running OCR (this can take a while)...")
-        ocr_response = _process_ocr(doc_url, client)
-    except Exception as e:
-        raise RuntimeError(f"OCR processing failed: {e}")
-    finally:
-        # Best-effort cleanup: the uploaded file is only needed for the OCR call.
-        if uploaded_file_id:
-            try:
-                client.files.delete(file_id=uploaded_file_id)
-            except Exception as e:
-                _error(f"Warning: failed to delete uploaded file {uploaded_file_id}: {e}")
-
-    # 3) Join page markdown
-    markdown_text = "\n\n".join(page.markdown for page in ocr_response.pages).strip()
-
-    # 4) Save images and rewrite links
-    if progress:
-        progress("Saving images and markdown...")
-    stem = pdf_file.stem
-    id_to_filename = _decode_and_save_images(ocr_response, outdir, stem)
-    rewritten_markdown = _rewrite_markdown(markdown_text, id_to_filename)
-
-    # 5) Write markdown file
-    md_path = outdir / f"{stem}.md"
-    md_path.write_text(rewritten_markdown, encoding="utf-8")
-
-    return md_path, id_to_filename
-
-
-def main() -> None:
+def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Convert one or more PDFs to Markdown using Mistral OCR. Images are saved alongside "
@@ -232,10 +41,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--backend",
+        choices=["mistral", "mock"],
+        default="mistral",
+        help="OCR backend to use (default: mistral)",
+    )
+    parser.add_argument(
         "--api-key",
         dest="api_key",
         default=None,
-        help="Mistral API key (or set MISTRAL_API_KEY env var)",
+        help="Mistral API key (or set MISTRAL_API_KEY env var); required for --backend mistral",
     )
     parser.add_argument(
         "--workers",
@@ -243,99 +58,222 @@ def main() -> None:
         default=None,
         help="Number of concurrent workers (default: min(16, number of files))",
     )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_OCR_MODEL,
+        help=f"OCR model to use (default: {DEFAULT_OCR_MODEL})",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=5,
+        help="Number of retries for transient failures (default: 5; 0 disables retries)",
+    )
+    parser.add_argument(
+        "--backoff-initial-ms",
+        type=int,
+        default=500,
+        help="Initial backoff delay in milliseconds (default: 500)",
+    )
+    parser.add_argument(
+        "--backoff-max-ms",
+        type=int,
+        default=20000,
+        help="Maximum backoff delay in milliseconds (default: 20000)",
+    )
+    parser.add_argument(
+        "--backoff-multiplier",
+        type=float,
+        default=2.0,
+        help="Backoff multiplier per retry (default: 2.0)",
+    )
+    parser.add_argument(
+        "--backoff-jitter",
+        type=float,
+        default=0.2,
+        help="Jitter fraction added to delays (0..1, default: 0.2)",
+    )
+    parser.add_argument(
+        "--keep-remote-file",
+        action="store_true",
+        help="(mistral backend) Do not delete the uploaded file from Mistral after OCR completes",
+    )
 
-    args = parser.parse_args()
+    # Mock-only knobs for UX testing.
+    parser.add_argument(
+        "--mock-pages",
+        type=int,
+        default=1,
+        help="(mock backend) Number of pages to generate (default: 1)",
+    )
+    parser.add_argument(
+        "--mock-images",
+        type=int,
+        default=1,
+        help="(mock backend) Images per page to generate (default: 1)",
+    )
+    parser.add_argument(
+        "--mock-delay-ms",
+        type=int,
+        default=0,
+        help="(mock backend) Artificial delay per file in milliseconds (default: 0)",
+    )
+    parser.add_argument(
+        "--mock-fail-first",
+        type=int,
+        default=0,
+        help="(mock backend) Fail N times before succeeding to exercise retries (default: 0)",
+    )
 
-    def _expand_inputs(inputs: list[str]) -> list[Path]:
-        files: list[Path] = []
-        errors: list[str] = []
+    return parser.parse_args(argv)
 
-        for raw in inputs:
-            pattern = os.path.expanduser(raw)
-            if any(ch in pattern for ch in "*?["):
-                matches = [Path(m) for m in glob.glob(pattern, recursive=True)]
-                if not matches:
-                    errors.append(f"No files match pattern: {raw}")
-                else:
-                    files.extend(matches)
-            else:
-                files.append(Path(pattern))
 
-        if errors:
-            for msg in errors:
-                _error(msg)
-            sys.exit(2)
+def _validate_args(args: argparse.Namespace) -> None:
+    if args.workers is not None and args.workers <= 0:
+        raise ValueError("--workers must be a positive integer")
+    if args.retries < 0:
+        raise ValueError("--retries must be >= 0")
+    if args.backoff_initial_ms < 0:
+        raise ValueError("--backoff-initial-ms must be >= 0")
+    if args.backoff_max_ms <= 0:
+        raise ValueError("--backoff-max-ms must be > 0")
+    if args.backoff_multiplier <= 0:
+        raise ValueError("--backoff-multiplier must be > 0")
+    if not (0.0 <= args.backoff_jitter <= 1.0):
+        raise ValueError("--backoff-jitter must be between 0 and 1")
+    if args.backend == "mock":
+        if args.mock_pages <= 0:
+            raise ValueError("--mock-pages must be > 0")
+        if args.mock_images < 0:
+            raise ValueError("--mock-images must be >= 0")
+        if args.mock_delay_ms < 0:
+            raise ValueError("--mock-delay-ms must be >= 0")
+        if args.mock_fail_first < 0:
+            raise ValueError("--mock-fail-first must be >= 0")
 
-        return files
 
-    pdf_files = _expand_inputs(args.pdf_files)
-    missing = [p for p in pdf_files if not p.exists()]
-    if missing:
-        for p in missing:
-            _error(f"Input file not found: {p}")
-        sys.exit(2)
+def main(argv: Optional[list[str]] = None) -> None:
+    try:
+        args = _parse_args(argv)
+        _validate_args(args)
+    except ValueError as e:
+        error(str(e))
+        raise SystemExit(2) from e
 
-    api_key = _load_api_key(args.api_key)
+    try:
+        pdf_files = expand_inputs(args.pdf_files)
+        validate_pdf_paths(pdf_files)
+    except ValueError as e:
+        error(str(e))
+        raise SystemExit(2) from e
 
-    # Single-file path: keep spinner UX
+    backoff = BackoffConfig(
+        max_retries=args.retries,
+        initial_delay_s=args.backoff_initial_ms / 1000.0,
+        max_delay_s=args.backoff_max_ms / 1000.0,
+        multiplier=args.backoff_multiplier,
+        jitter=args.backoff_jitter,
+    )
+
+    runner = None
+    if args.backend == "mistral":
+        api_key = load_api_key(args.api_key)
+        runner = make_mistral_runner(api_key=api_key, backoff=backoff)
+    else:
+        mock_cfg = MockConfig(
+            pages=args.mock_pages,
+            images_per_page=args.mock_images,
+            delay_ms=args.mock_delay_ms,
+            fail_first=args.mock_fail_first,
+        )
+        runner = make_mock_runner(mock=mock_cfg, backoff=backoff)
+
+    # Single-file path: keep spinner UX.
     if len(pdf_files) == 1:
         pdf_path = pdf_files[0]
         outdir: Path = args.outdir or (pdf_path.parent / f"{pdf_path.stem}_ocr")
 
-        spinner = _Spinner(enabled=True)
+        spinner = Spinner(enabled=True)
         try:
             spinner.start("Starting...")
-            md_path, _ = convert_pdf_to_markdown(pdf_path, outdir, api_key, progress=spinner.update)
+            result = convert_pdf_to_markdown(
+                pdf_file=pdf_path,
+                outdir=outdir,
+                runner=runner,
+                model=args.model,
+                delete_remote_file=not args.keep_remote_file,
+                progress=spinner.update,
+            )
             spinner.stop(clear=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             spinner.stop(clear=True)
-            _error(str(e))
-            sys.exit(1)
+            error(str(e))
+            raise SystemExit(1) from e
 
-        print(str(md_path))
+        print(str(result.markdown_path))
         return
 
-    # Batch path: concurrent processing
+    # Batch path: concurrent processing.
     base_outdir = args.outdir
     max_workers = args.workers or min(16, len(pdf_files))
+    total_files = len(pdf_files)
 
     def _outdir_for(pdf: Path) -> Path:
         if base_outdir:
             return base_outdir / f"{pdf.stem}_ocr"
         return pdf.parent / f"{pdf.stem}_ocr"
 
-    def _task(pdf: Path) -> Tuple[Path, Optional[str]]:
+    spinner = Spinner(enabled=True)
+
+    def _task(pdf: Path, idx_1based: int) -> Tuple[Path, Optional[str]]:
         try:
             outdir = _outdir_for(pdf)
-            md_path, _ = convert_pdf_to_markdown(pdf, outdir, api_key)
-            return md_path, None
+
+            def _progress(msg: str) -> None:
+                spinner.update(f"[{idx_1based}/{total_files}] {pdf.name}: {msg}")
+
+            res = convert_pdf_to_markdown(
+                pdf_file=pdf,
+                outdir=outdir,
+                runner=runner,
+                model=args.model,
+                delete_remote_file=not args.keep_remote_file,
+                progress=_progress,
+            )
+            return res.markdown_path, None
         except Exception as e:  # noqa: BLE001
             return pdf, str(e)
 
-    results: list[Tuple[Path, Optional[str]]] = [None] * len(pdf_files)  # type: ignore[assignment]
+    results: list[Tuple[Path, Optional[str]]] = [(p, "not started") for p in pdf_files]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_idx = {
-            pool.submit(_task, pdf): idx for idx, pdf in enumerate(pdf_files)
-        }
-        for future in concurrent.futures.as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                results[idx] = future.result()
-            except Exception as e:  # pragma: no cover - defensive
-                results[idx] = (pdf_files[idx], str(e))
+    spinner.start(f"Starting batch ({total_files} files, {max_workers} workers)...")
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_idx = {pool.submit(_task, pdf, idx + 1): idx for idx, pdf in enumerate(pdf_files)}
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:  # pragma: no cover
+                    results[idx] = (pdf_files[idx], str(e))
+                completed += 1
+                spinner.update(f"Completed {completed}/{total_files}: {pdf_files[idx].name}")
+    finally:
+        spinner.stop(clear=True)
 
     failed = False
-    for (pdf, maybe_err), original_pdf in zip(results, pdf_files):
+    for (md_path, maybe_err), original_pdf in zip(results, pdf_files):
         if maybe_err is None:
-            print(str(pdf))
+            print(str(md_path))
         else:
             failed = True
-            _error(f"Failed to process {original_pdf}: {maybe_err}")
+            error(f"Failed to process {original_pdf}: {maybe_err}")
 
     if failed:
-        sys.exit(1)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
+
