@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 
 ProgressFn = Callable[[str], None]
@@ -10,7 +10,7 @@ ProgressFn = Callable[[str], None]
 @dataclass(frozen=True, slots=True)
 class OcrImage:
     id: str
-    image_base64: Optional[str] = None
+    image_base64: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,4 +22,3 @@ class OcrPage:
 @dataclass(frozen=True, slots=True)
 class OcrResult:
     pages: list[OcrPage]
-

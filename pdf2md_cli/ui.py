@@ -5,7 +5,6 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -20,7 +19,7 @@ class Spinner:
         self._msg = ""
         self._running = False
         self._lock = threading.Lock()
-        self._t: Optional[threading.Thread] = None
+        self._t: threading.Thread | None = None
 
     def start(self, msg: str) -> None:
         if not self.enabled:
@@ -69,4 +68,3 @@ class Spinner:
             sys.stderr.flush()
         except Exception:
             pass
-

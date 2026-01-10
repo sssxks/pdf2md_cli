@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
 
 from pdf2md_cli.backends.mistral import make_mistral_runner
 from pdf2md_cli.pipeline import convert_pdf_to_markdown
@@ -23,8 +22,8 @@ def convert_pdf_to_markdown_mistral(
     backoff_max_s: float = 20.0,
     backoff_multiplier: float = 2.0,
     backoff_jitter: float = 0.2,
-    progress: Optional[ProgressFn] = None,
-) -> Tuple[Path, Dict[str, str]]:
+    progress: ProgressFn | None = None,
+) -> tuple[Path, dict[str, str]]:
     backoff = BackoffConfig(
         max_retries=max_retries,
         initial_delay_s=backoff_initial_s,
@@ -46,4 +45,3 @@ def convert_pdf_to_markdown_mistral(
 
 # Backwards-compatible alias for older code importing pdf2md_cli.cli.convert_pdf_to_markdown.
 convert_pdf_to_markdown = convert_pdf_to_markdown_mistral
-

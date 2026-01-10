@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from mistralai import Mistral
 
 from pdf2md_cli.pipeline import OcrRunner
@@ -16,10 +14,10 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
         content: bytes,
         model: str,
         delete_remote_file: bool,
-        progress: Optional[ProgressFn],
+        progress: ProgressFn | None,
     ) -> OcrResult:
         with Mistral(api_key=api_key) as client:
-            uploaded_file_id: Optional[str] = None
+            uploaded_file_id: str | None = None
 
             try:
                 if progress:
@@ -99,4 +97,3 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
         return OcrResult(pages=pages)
 
     return run
-

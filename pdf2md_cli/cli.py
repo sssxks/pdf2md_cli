@@ -4,7 +4,6 @@ import argparse
 import concurrent.futures
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
 
 from pdf2md_cli.auth import error, load_api_key
 from pdf2md_cli.backends.mistral import make_mistral_runner
@@ -17,7 +16,7 @@ from pdf2md_cli.ui import Spinner
 DEFAULT_OCR_MODEL = "mistral-ocr-2505"
 
 
-def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Convert one or more PDFs to Markdown using Mistral OCR. Images are saved alongside "
@@ -152,7 +151,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--mock-fail-first must be >= 0")
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     try:
         args = _parse_args(argv)
         _validate_args(args)
@@ -225,7 +224,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     spinner = Spinner(enabled=True)
 
-    def _task(pdf: Path, idx_1based: int) -> Tuple[Path, Optional[str]]:
+    def _task(pdf: Path, idx_1based: int) -> tuple[Path, str | None]:
         try:
             outdir = _outdir_for(pdf)
 
@@ -244,7 +243,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         except Exception as e:  # noqa: BLE001
             return pdf, str(e)
 
-    results: list[Tuple[Path, Optional[str]]] = [(p, "not started") for p in pdf_files]
+    results: list[tuple[Path, str | None]] = [(p, "not started") for p in pdf_files]
 
     spinner.start(f"Starting batch ({total_files} files, {max_workers} workers)...")
     try:
@@ -276,4 +275,3 @@ def main(argv: Optional[list[str]] = None) -> None:
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-

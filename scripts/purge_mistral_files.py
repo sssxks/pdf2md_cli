@@ -23,8 +23,9 @@ import argparse
 import os
 import sys
 import time
+from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 from mistralai import Mistral
 
@@ -33,7 +34,7 @@ def _error(msg: str) -> None:
     print(f"Error: {msg}", file=sys.stderr)
 
 
-def _load_api_key(cli_key: Optional[str]) -> str:
+def _load_api_key(cli_key: str | None) -> str:
     key = (cli_key or "").strip() or os.environ.get("MISTRAL_API_KEY", "").strip()
     if not key:
         _error("Mistral API key not provided. Use --api-key or set MISTRAL_API_KEY env var.")
@@ -41,7 +42,7 @@ def _load_api_key(cli_key: Optional[str]) -> str:
     return key
 
 
-def _to_dict(obj: Any) -> Dict[str, Any]:
+def _to_dict(obj: Any) -> dict[str, Any]:
     if isinstance(obj, dict):
         return obj
     if hasattr(obj, "model_dump"):
@@ -53,11 +54,11 @@ def _to_dict(obj: Any) -> Dict[str, Any]:
     return dict(obj)  # last resort; may raise
 
 
-def _get_items(list_response: Any) -> List[Dict[str, Any]]:
+def _get_items(list_response: Any) -> list[dict[str, Any]]:
     data = getattr(list_response, "data", None)
     if data is None:
         data = _to_dict(list_response).get("data", [])
-    items: List[Dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     for item in data or []:
         items.append(_to_dict(item))
     return items
@@ -72,7 +73,9 @@ def _fmt_ts(ts: Any) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _iter_all_files(client: Mistral, page_size: int, max_pages: Optional[int]) -> Iterable[Dict[str, Any]]:
+def _iter_all_files(
+    client: Mistral, page_size: int, max_pages: int | None
+) -> Iterable[dict[str, Any]]:
     page = 0
     seen_ids: set[str] = set()
 
@@ -136,7 +139,7 @@ def main() -> None:
     api_key = _load_api_key(args.api_key)
     client = Mistral(api_key=api_key)
 
-    candidates: List[Dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     for item in _iter_all_files(client, page_size=args.page_size, max_pages=args.max_pages):
         if args.purpose and str(item.get("purpose", "")).strip() != args.purpose:
             continue
@@ -195,4 +198,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

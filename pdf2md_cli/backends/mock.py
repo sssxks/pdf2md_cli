@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from pdf2md_cli.pipeline import OcrRunner
 from pdf2md_cli.retry import BackoffConfig, with_backoff
@@ -30,7 +29,7 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
         content: bytes,
         model: str,
         delete_remote_file: bool,
-        progress: Optional[ProgressFn],
+        progress: ProgressFn | None,
     ) -> OcrResult:
         # Parameters exist to match the real runner; most are unused but useful for UX parity.
         _ = (file_name, content, model, delete_remote_file)

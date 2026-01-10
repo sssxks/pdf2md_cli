@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Callable, Optional, TypeVar
+from typing import Callable, TypeVar
 
 from pdf2md_cli.types import ProgressFn
 
@@ -25,7 +25,7 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def _parse_retry_after_seconds(exc: BaseException) -> Optional[float]:
+def _parse_retry_after_seconds(exc: BaseException) -> float | None:
     """
     Best-effort parse of Retry-After from exceptions coming from httpx / SDK wrappers.
 
@@ -64,7 +64,7 @@ def _parse_retry_after_seconds(exc: BaseException) -> Optional[float]:
         return None
 
 
-def _get_status_code_from_exc(exc: BaseException) -> Optional[int]:
+def _get_status_code_from_exc(exc: BaseException) -> int | None:
     response = getattr(exc, "response", None)
     if response is not None:
         status_code = getattr(response, "status_code", None)
@@ -130,7 +130,7 @@ def with_backoff(
     *,
     what: str,
     cfg: BackoffConfig,
-    progress: Optional[ProgressFn] = None,
+    progress: ProgressFn | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     rng: random.Random = random,
 ) -> T:
@@ -180,4 +180,3 @@ def with_backoff(
 
             sleep_fn(sleep_s)
             delay_s = _clamp(delay_s * cfg.multiplier, 0.0, cfg.max_delay_s)
-

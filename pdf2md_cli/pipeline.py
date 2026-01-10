@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Dict, Optional, Protocol, Tuple
+from typing import Protocol
 
 from PIL import Image
 
@@ -20,14 +20,14 @@ class OcrRunner(Protocol):
         content: bytes,
         model: str,
         delete_remote_file: bool,
-        progress: Optional[ProgressFn],
+        progress: ProgressFn | None,
     ) -> OcrResult: ...
 
 
 @dataclass(frozen=True, slots=True)
 class ConvertResult:
     markdown_path: Path
-    image_id_to_filename: Dict[str, str]
+    image_id_to_filename: dict[str, str]
 
 
 VALID_DOCUMENT_EXTENSIONS = {".pdf"}
@@ -48,14 +48,14 @@ def write_placeholder_png(path: Path) -> None:
     Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(path, format="PNG")
 
 
-def decode_and_save_images(ocr_result: OcrResult, outdir: Path, stem: str) -> Dict[str, str]:
+def decode_and_save_images(ocr_result: OcrResult, outdir: Path, stem: str) -> dict[str, str]:
     """
     Save images to disk and return a map from OCR image id -> saved filename.
 
     Images are saved next to the markdown file as: {stem}_image_XXX.png
     """
 
-    id_to_filename: Dict[str, str] = {}
+    id_to_filename: dict[str, str] = {}
     img_counter = 1
 
     for page in ocr_result.pages:
@@ -79,7 +79,7 @@ def decode_and_save_images(ocr_result: OcrResult, outdir: Path, stem: str) -> Di
     return id_to_filename
 
 
-def rewrite_markdown(markdown_text: str, id_to_filename: Dict[str, str]) -> str:
+def rewrite_markdown(markdown_text: str, id_to_filename: dict[str, str]) -> str:
     pattern = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
 
     def repl(match: re.Match[str]) -> str:
@@ -102,7 +102,7 @@ def convert_pdf_to_markdown(
     runner: OcrRunner,
     model: str,
     delete_remote_file: bool,
-    progress: Optional[ProgressFn] = None,
+    progress: ProgressFn | None = None,
 ) -> ConvertResult:
     if pdf_file.suffix.lower() not in VALID_DOCUMENT_EXTENSIONS:
         raise ValueError(f"Unsupported file type: {pdf_file.suffix}. Only PDFs are supported.")
@@ -135,4 +135,3 @@ def convert_pdf_to_markdown(
     md_path.write_text(rewritten_markdown, encoding="utf-8")
 
     return ConvertResult(markdown_path=md_path, image_id_to_filename=id_to_filename)
-
