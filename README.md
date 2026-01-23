@@ -1,6 +1,6 @@
-## pdf2md-cli
+## 2md
 
-Convert one or more PDFs to Markdown using **Mistral OCR**.
+Convert one or more PDFs/images to Markdown using **Mistral OCR**.
 
 ### Install (uv)
 
@@ -19,14 +19,27 @@ setx MISTRAL_API_KEY "YOUR_KEY"
 Run:
 
 ```bash
-pdf2md path\\to\\file.pdf
-pdf2md docs\\*.pdf --workers 4
-pdf2md path\\to\\file.pdf -o out
-pdf2md path\\to\\file.pdf --model mistral-ocr-2505
-pdf2md path\\to\\file.pdf --keep-remote-file
-pdf2md docs\\*.pdf --workers 4 --retries 8 --backoff-max-ms 60000
-pdf2md path\\to\\file.pdf --backend mock --mock-pages 2 --mock-images 3 --mock-delay-ms 250
+2md path\\to\\file.pdf
+2md path\\to\\image.png
+2md docs\\*.pdf --workers 4
+2md docs\\*.png --workers 4
+2md path\\to\\file.pdf -o out
+2md path\\to\\file.pdf --model mistral-ocr-2505
+2md path\\to\\file.pdf --keep-remote-file
+2md docs\\*.pdf --workers 4 --retries 8 --backoff-max-ms 60000
+2md path\\to\\file.pdf --backend mock --mock-pages 2 --mock-images 3 --mock-delay-ms 250
 ```
+
+Supported image formats:
+
+- JPEG (`.jpg`, `.jpeg`)
+- PNG (`.png`)
+- AVIF (`.avif`)
+- TIFF (`.tif`, `.tiff`)
+- GIF (`.gif`)
+- HEIC/HEIF (`.heic`, `.heif`)
+- BMP (`.bmp`)
+- WebP (`.webp`)
 
 Retries and backoff:
 
@@ -36,7 +49,9 @@ Retries and backoff:
 
 ### Remote file cleanup (after OCR)
 
-This CLI uploads your PDF to Mistral's Files API with `purpose="ocr"` and **deletes the uploaded file after the OCR call completes** (best-effort).
+For PDF inputs, this CLI uploads your PDF to Mistral's Files API with `purpose="ocr"` and **deletes the uploaded file after the OCR call completes** (best-effort).
+
+For image inputs, the CLI sends a `data:` URL to the OCR API (no file upload), so there is no remote file to delete.
 
 If you are calling the API yourself and want to delete an uploaded file explicitly, you can do:
 

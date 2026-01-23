@@ -29,10 +29,12 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
         content: bytes,
         model: str,
         delete_remote_file: bool,
+        input_kind: str,
+        mime_type: str | None,
         progress: ProgressFn | None,
     ) -> OcrResult:
         # Parameters exist to match the real runner; most are unused but useful for UX parity.
-        _ = (file_name, content, model, delete_remote_file)
+        _ = (file_name, content, model, delete_remote_file, input_kind, mime_type)
 
         remaining_failures = mock.fail_first
 

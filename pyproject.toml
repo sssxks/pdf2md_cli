@@ -3,7 +3,7 @@ name = "pdf2md-cli"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13, <3.14"
 dependencies = [
     "mistralai>=1.9.6",
     "pillow>=11.3.0",
@@ -14,7 +14,7 @@ requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-pdf2md = "pdf2md_cli.cli:main"
+2md = "pdf2md_cli.cli:main"
 
 [[tool.uv.index]]
 url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"

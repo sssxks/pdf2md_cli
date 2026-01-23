@@ -8,8 +8,8 @@ from pathlib import Path
 from pdf2md_cli.auth import error, load_api_key
 from pdf2md_cli.backends.mistral import make_mistral_runner
 from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
-from pdf2md_cli.inputs import expand_inputs, validate_pdf_paths
-from pdf2md_cli.pipeline import convert_pdf_to_markdown
+from pdf2md_cli.inputs import expand_inputs, validate_input_paths
+from pdf2md_cli.pipeline import convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
 from pdf2md_cli.ui import Spinner
 
@@ -19,14 +19,14 @@ DEFAULT_OCR_MODEL = "mistral-ocr-2505"
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert one or more PDFs to Markdown using Mistral OCR. Images are saved alongside "
+            "Convert one or more PDFs/images to Markdown using Mistral OCR. Images are saved alongside "
             "the produced markdown files. Batch runs are processed concurrently."
         )
     )
     parser.add_argument(
-        "pdf_files",
+        "files",
         nargs="+",
-        help="One or more PDF files to process (supports glob patterns, e.g. docs/*.pdf)",
+        help="One or more files to process (PDF or supported image; supports glob patterns, e.g. docs/*.*)",
     )
     parser.add_argument(
         "-o",
@@ -36,7 +36,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Output directory. For a single file, this is the exact output folder. "
             "For multiple files, this folder is used as a base and each file writes to "
-            "<outdir>/<pdf_stem>_ocr. Default: <PDF_DIR>/<PDF_STEM>_ocr"
+            "<outdir>/<input_stem>_ocr. Default: <INPUT_DIR>/<INPUT_STEM>_ocr"
         ),
     )
     parser.add_argument(
@@ -160,8 +160,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2) from e
 
     try:
-        pdf_files = expand_inputs(args.pdf_files)
-        validate_pdf_paths(pdf_files)
+        input_files = expand_inputs(args.files)
+        validate_input_paths(input_files)
     except ValueError as e:
         error(str(e))
         raise SystemExit(2) from e
@@ -188,15 +188,15 @@ def main(argv: list[str] | None = None) -> None:
         runner = make_mock_runner(mock=mock_cfg, backoff=backoff)
 
     # Single-file path: keep spinner UX.
-    if len(pdf_files) == 1:
-        pdf_path = pdf_files[0]
-        outdir: Path = args.outdir or (pdf_path.parent / f"{pdf_path.stem}_ocr")
+    if len(input_files) == 1:
+        input_path = input_files[0]
+        outdir: Path = args.outdir or (input_path.parent / f"{input_path.stem}_ocr")
 
         spinner = Spinner(enabled=True)
         try:
             spinner.start("Starting...")
-            result = convert_pdf_to_markdown(
-                pdf_file=pdf_path,
+            result = convert_file_to_markdown(
+                input_file=input_path,
                 outdir=outdir,
                 runner=runner,
                 model=args.model,
@@ -214,25 +214,25 @@ def main(argv: list[str] | None = None) -> None:
 
     # Batch path: concurrent processing.
     base_outdir = args.outdir
-    max_workers = args.workers or min(16, len(pdf_files))
-    total_files = len(pdf_files)
+    max_workers = args.workers or min(16, len(input_files))
+    total_files = len(input_files)
 
-    def _outdir_for(pdf: Path) -> Path:
+    def _outdir_for(p: Path) -> Path:
         if base_outdir:
-            return base_outdir / f"{pdf.stem}_ocr"
-        return pdf.parent / f"{pdf.stem}_ocr"
+            return base_outdir / f"{p.stem}_ocr"
+        return p.parent / f"{p.stem}_ocr"
 
     spinner = Spinner(enabled=True)
 
-    def _task(pdf: Path, idx_1based: int) -> tuple[Path, str | None]:
+    def _task(p: Path, idx_1based: int) -> tuple[Path, str | None]:
         try:
-            outdir = _outdir_for(pdf)
+            outdir = _outdir_for(p)
 
             def _progress(msg: str) -> None:
-                spinner.update(f"[{idx_1based}/{total_files}] {pdf.name}: {msg}")
+                spinner.update(f"[{idx_1based}/{total_files}] {p.name}: {msg}")
 
-            res = convert_pdf_to_markdown(
-                pdf_file=pdf,
+            res = convert_file_to_markdown(
+                input_file=p,
                 outdir=outdir,
                 runner=runner,
                 model=args.model,
@@ -241,33 +241,33 @@ def main(argv: list[str] | None = None) -> None:
             )
             return res.markdown_path, None
         except Exception as e:  # noqa: BLE001
-            return pdf, str(e)
+            return p, str(e)
 
-    results: list[tuple[Path, str | None]] = [(p, "not started") for p in pdf_files]
+    results: list[tuple[Path, str | None]] = [(p, "not started") for p in input_files]
 
     spinner.start(f"Starting batch ({total_files} files, {max_workers} workers)...")
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            future_to_idx = {pool.submit(_task, pdf, idx + 1): idx for idx, pdf in enumerate(pdf_files)}
+            future_to_idx = {pool.submit(_task, p, idx + 1): idx for idx, p in enumerate(input_files)}
             completed = 0
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
                     results[idx] = future.result()
                 except Exception as e:  # pragma: no cover
-                    results[idx] = (pdf_files[idx], str(e))
+                    results[idx] = (input_files[idx], str(e))
                 completed += 1
-                spinner.update(f"Completed {completed}/{total_files}: {pdf_files[idx].name}")
+                spinner.update(f"Completed {completed}/{total_files}: {input_files[idx].name}")
     finally:
         spinner.stop(clear=True)
 
     failed = False
-    for (md_path, maybe_err), original_pdf in zip(results, pdf_files):
+    for (md_path, maybe_err), original_input in zip(results, input_files):
         if maybe_err is None:
             print(str(md_path))
         else:
             failed = True
-            error(f"Failed to process {original_pdf}: {maybe_err}")
+            error(f"Failed to process {original_input}: {maybe_err}")
 
     if failed:
         raise SystemExit(1)
