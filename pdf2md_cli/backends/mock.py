@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from pdf2md_cli.pipeline import OcrRunner
 from pdf2md_cli.retry import BackoffConfig, with_backoff
-from pdf2md_cli.types import OcrImage, OcrPage, OcrResult, Progress
+from pdf2md_cli.types import InputKind, OcrImage, OcrPage, OcrResult, OcrTable, Progress, TableFormat
 
 
 _TINY_PNG_BASE64 = (
@@ -29,9 +29,9 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
         content: bytes,
         model: str,
         delete_remote_file: bool,
-        input_kind: str,
+        input_kind: InputKind,
         mime_type: str | None,
-        table_format: str | None,
+        table_format: TableFormat | None,
         extract_header: bool,
         extract_footer: bool,
         include_image_base64: bool,
@@ -76,7 +76,27 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
                     images.append(OcrImage(id=img_id, image_base64=_TINY_PNG_BASE64))
                     md_lines.append(f"![{img_id}]({img_id})")
 
-                pages.append(OcrPage(markdown="\n".join(md_lines).strip(), images=images))
+                tables: list[OcrTable] = []
+                if table_format is None:
+                    md_lines.extend(
+                        [
+                            "",
+                            "| A | B |",
+                            "| - | - |",
+                            "| 1 | 2 |",
+                        ]
+                    )
+                else:
+                    ext = "html" if table_format == TableFormat.HTML else "md"
+                    tbl_id = f"tbl-{p + 1}.{ext}"
+                    md_lines.extend(["", f"[{tbl_id}]({tbl_id})"])
+                    if table_format == TableFormat.HTML:
+                        content = "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
+                    else:
+                        content = "| A | B |\n| - | - |\n| 1 | 2 |"
+                    tables.append(OcrTable(id=tbl_id, content=content, format=table_format.value))
+
+                pages.append(OcrPage(markdown="\n".join(md_lines).strip(), images=images, tables=tables))
 
             return OcrResult(pages=pages)
 

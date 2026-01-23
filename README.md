@@ -26,11 +26,30 @@ Run:
 2md path\\to\\file.pdf -o out
 2md path\\to\\file.pdf --model mistral-ocr-latest
 2md path\\to\\file.pdf --keep-remote-file
-2md path\\to\\file.pdf --table-format null
-2md path\\to\\file.pdf --no-inline-tables
+2md path\\to\\file.pdf                      # default: --table-format html (extract + inline; no tbl-*.html files)
+2md path\\to\\file.pdf --table-format markdown
+2md path\\to\\file.pdf --extract-table --table-format html
+2md path\\to\\file.pdf --extract-table --table-format markdown
 2md path\\to\\file.pdf --no-front-matter --no-page-markers
 2md docs\\*.pdf --workers 4 --retries 8 --backoff-max-ms 60000
 ```
+
+Help:
+
+```bash
+2md -h
+2md help tables
+2md help advanced
+```
+
+Table handling behavior:
+
+| Flags | Mistral `table_format` | Markdown output | Sidecar files |
+| --- | --- | --- | --- |
+| *(default)* `--table-format html` | `html` | HTML tables are inlined | none |
+| `--table-format markdown` | *(not sent)* | Tables stay inline as markdown | none |
+| `--extract-table --table-format html` | `html` | Links to `tbl-*.html` | writes `tbl-*.html` |
+| `--extract-table --table-format markdown` | `markdown` | Links to `tbl-*.md` | writes `tbl-*.md` |
 
 Supported image formats:
 

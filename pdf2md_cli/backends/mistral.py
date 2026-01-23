@@ -10,7 +10,7 @@ from mistralai import Mistral
 
 from pdf2md_cli.pipeline import OcrRunner
 from pdf2md_cli.retry import BackoffConfig, with_backoff
-from pdf2md_cli.types import OcrImage, OcrPage, OcrResult, OcrTable, Progress
+from pdf2md_cli.types import InputKind, OcrImage, OcrPage, OcrResult, OcrTable, Progress, TableFormat
 
 
 class _HttpResponseLike:
@@ -66,9 +66,9 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
         content: bytes,
         model: str,
         delete_remote_file: bool,
-        input_kind: str,
+        input_kind: InputKind,
         mime_type: str | None,
-        table_format: str | None,
+        table_format: TableFormat | None,
         extract_header: bool,
         extract_footer: bool,
         include_image_base64: bool,
@@ -77,7 +77,7 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
         with Mistral(api_key=api_key) as client:
             uploaded_file_id: str | None = None
 
-            if input_kind == "image":
+            if input_kind == InputKind.IMAGE:
                 if not mime_type:
                     raise ValueError("mime_type is required for image inputs")
                 progress.emit("Encoding image...")
@@ -92,7 +92,7 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                             "model": model,
                             "document": {"type": "image_url", "image_url": f"data:{mime_type};base64,{b64}"},
                             "include_image_base64": include_image_base64,
-                            **({} if table_format is None else {"table_format": table_format}),
+                            **({} if table_format is None else {"table_format": table_format.value}),
                             **({} if not extract_header else {"extract_header": True}),
                             **({} if not extract_footer else {"extract_footer": True}),
                         },
@@ -101,7 +101,7 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                     cfg=backoff,
                     progress=progress,
                 )
-            elif input_kind == "pdf":
+            elif input_kind == InputKind.PDF:
                 try:
                     progress.emit("Uploading PDF...")
 
@@ -145,7 +145,7 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                                 "model": model,
                                 "document": {"type": "document_url", "document_url": doc_url},
                                 "include_image_base64": include_image_base64,
-                                **({} if table_format is None else {"table_format": table_format}),
+                                **({} if table_format is None else {"table_format": table_format.value}),
                                 **({} if not extract_header else {"extract_header": True}),
                                 **({} if not extract_footer else {"extract_footer": True}),
                             },

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Callable
@@ -41,6 +42,16 @@ class Progress:
 
 
 NO_PROGRESS = Progress(None)
+
+
+class TableFormat(StrEnum):
+    HTML = "html"
+    MARKDOWN = "markdown"
+
+
+class InputKind(StrEnum):
+    PDF = "pdf"
+    IMAGE = "image"
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,7 +13,7 @@ from marko.block import HTMLBlock, Paragraph
 from marko.inline import Image, Link, RawText
 from marko.md_renderer import MarkdownRenderer
 
-from pdf2md_cli.types import NO_PROGRESS, OcrResult, Progress
+from pdf2md_cli.types import NO_PROGRESS, InputKind, OcrResult, Progress, TableFormat
 
 
 class OcrRunner(Protocol):
@@ -24,9 +24,9 @@ class OcrRunner(Protocol):
         content: bytes,
         model: str,
         delete_remote_file: bool,
-        input_kind: str,
+        input_kind: InputKind,
         mime_type: str | None,
-        table_format: str | None,
+        table_format: TableFormat | None,
         extract_header: bool,
         extract_footer: bool,
         include_image_base64: bool,
@@ -194,11 +194,6 @@ def build_front_matter(
     *,
     input_file: Path,
     model: str,
-    table_format: str | None,
-    inline_tables: bool,
-    extract_header: bool,
-    extract_footer: bool,
-    include_image_base64: bool,
     ocr_result: OcrResult,
 ) -> str:
     try:
@@ -208,10 +203,8 @@ def build_front_matter(
 
     pages = len(ocr_result.pages)
     images = sum(len(p.images) for p in ocr_result.pages)
-    tables = sum(len(getattr(p, "tables", []) or []) for p in ocr_result.pages)
 
     generated_at_utc = datetime.now(UTC).isoformat(timespec="seconds")
-    table_format_str = "null" if table_format is None else table_format
 
     lines = [
         "---",
@@ -220,14 +213,8 @@ def build_front_matter(
         f"ocr_model: {_yaml_quote(model)}",
         f"source_file: {_yaml_quote(input_file.name)}",
         f"generated_at_utc: {_yaml_quote(generated_at_utc)}",
-        f"table_format: {table_format_str}",
-        f"inline_tables: {str(bool(inline_tables)).lower()}",
-        f"extract_header: {str(bool(extract_header)).lower()}",
-        f"extract_footer: {str(bool(extract_footer)).lower()}",
-        f"include_image_base64: {str(bool(include_image_base64)).lower()}",
         f"pages: {pages}",
         f"images: {images}",
-        f"tables: {tables}",
         "---",
         "",
     ]
@@ -274,37 +261,65 @@ def _inline_tables_in_blocks(node: object, id_to_table_html: dict[str, str]) -> 
     if not isinstance(children, list):
         return
 
-    for child in children:
-        _inline_tables_in_blocks(child, id_to_table_html)
-
-    for idx, child in enumerate(list(children)):
-        if not isinstance(child, Paragraph):
-            continue
-
-        inlines = getattr(child, "children", None)
-        if not isinstance(inlines, list):
-            continue
-
-        significant: list[object] = []
+    def _split_has_significant_inline(inlines: list[object]) -> bool:
         for inline in inlines:
-            if isinstance(inline, RawText) and isinstance(inline.children, str) and inline.children.strip() == "":
+            if isinstance(inline, RawText) and isinstance(inline.children, str):
+                if inline.children.strip() != "":
+                    return True
                 continue
-            significant.append(inline)
+            return True
+        return False
 
-        if len(significant) != 1:
-            continue
-
-        only = significant[0]
-        if not isinstance(only, Link) or isinstance(only, Image):
-            continue
-
-        dest = str(getattr(only, "dest", "") or "")
+    def _table_html_for_inline(inline: object) -> tuple[str, str] | None:
+        if not isinstance(inline, Link) or isinstance(inline, Image):
+            return None
+        dest = str(getattr(inline, "dest", "") or "")
         filename = PurePath(dest.split("#", 1)[0].split("?", 1)[0]).name
         html = id_to_table_html.get(filename)
         if not html:
+            return None
+        return filename, html
+
+    for child in children:
+        _inline_tables_in_blocks(child, id_to_table_html)
+
+    new_children: list[object] = []
+    for child in children:
+        if not isinstance(child, Paragraph):
+            new_children.append(child)
             continue
 
-        children[idx] = HTMLBlock(f"<!-- table: {filename} -->\n\n{html}")
+        inlines = getattr(child, "children", None)
+        if not isinstance(inlines, list) or not inlines:
+            new_children.append(child)
+            continue
+
+        segment: list[object] = []
+        replaced_any = False
+        for inline in inlines:
+            tbl = _table_html_for_inline(inline)
+            if tbl is None:
+                segment.append(inline)
+                continue
+
+            filename, html = tbl
+            if _split_has_significant_inline(segment):
+                p = Paragraph([])
+                p.children = segment
+                new_children.append(p)
+            segment = []
+            new_children.append(HTMLBlock(f"<!-- table: {filename} -->\n\n{html}"))
+            replaced_any = True
+
+        if replaced_any:
+            if _split_has_significant_inline(segment):
+                p = Paragraph([])
+                p.children = segment
+                new_children.append(p)
+        else:
+            new_children.append(child)
+
+    node.children = new_children
 
 
 def rewrite_markdown(
@@ -313,14 +328,14 @@ def rewrite_markdown(
     *,
     ocr_result: OcrResult | None = None,
     inline_tables: bool = False,
-    table_format: str | None = None,
+    table_format: TableFormat | None = None,
 ) -> str:
     md = marko.Markdown(renderer=MarkdownRenderer)
     doc = md.parse(markdown_text)
 
     _rewrite_images_in_place(doc, id_to_filename)
 
-    if inline_tables and table_format == "html" and ocr_result is not None:
+    if inline_tables and table_format == TableFormat.HTML and ocr_result is not None:
         id_to_table_html: dict[str, str] = {}
         for page in ocr_result.pages:
             for tbl in getattr(page, "tables", []) or []:
@@ -339,14 +354,14 @@ def convert_pdf_to_markdown(
     runner: OcrRunner,
     model: str,
     delete_remote_file: bool,
-    table_format: str | None = None,
+    table_format: TableFormat | None = None,
     extract_header: bool = False,
     extract_footer: bool = False,
     include_image_base64: bool = True,
     progress: Progress = NO_PROGRESS,
 ) -> ConvertResult:
     input_kind, _mime_type = _classify_input(pdf_file)
-    if input_kind != "pdf":
+    if input_kind != InputKind.PDF:
         raise ValueError(f"pdf_file must be a PDF (.pdf). Got: {pdf_file.name}")
     return convert_file_to_markdown(
         input_file=pdf_file,
@@ -362,15 +377,15 @@ def convert_pdf_to_markdown(
     )
 
 
-def _classify_input(input_file: Path) -> tuple[str, str | None]:
+def _classify_input(input_file: Path) -> tuple[InputKind, str | None]:
     ext = input_file.suffix.lower()
     if ext in VALID_DOCUMENT_EXTENSIONS:
-        return "pdf", None
+        return InputKind.PDF, None
     if ext in VALID_IMAGE_EXTENSIONS:
         mime = _EXT_TO_MIME.get(ext)
         if not mime:
             raise ValueError(f"Unsupported image type: {ext}")
-        return "image", mime
+        return InputKind.IMAGE, mime
     raise ValueError(
         f"Unsupported file type: {ext}. Supported: PDFs ({', '.join(sorted(VALID_DOCUMENT_EXTENSIONS))}) "
         f"and images ({', '.join(sorted(VALID_IMAGE_EXTENSIONS))})."
@@ -384,7 +399,7 @@ def convert_file_to_markdown(
     runner: OcrRunner,
     model: str,
     delete_remote_file: bool,
-    table_format: str | None = None,
+    table_format: TableFormat | None = None,
     extract_header: bool = False,
     extract_footer: bool = False,
     include_image_base64: bool = True,
@@ -428,7 +443,8 @@ def convert_file_to_markdown(
     progress.emit("Saving images and markdown...")
     stem = input_file.stem
     id_to_filename = decode_and_save_images(ocr_result, outdir, stem)
-    write_tables(ocr_result, outdir)
+    if table_format is not None and not inline_tables:
+        write_tables(ocr_result, outdir)
     write_extracted_headers_and_footers(ocr_result, outdir, stem)
     rewritten_markdown = rewrite_markdown(
         markdown_text,
@@ -443,11 +459,6 @@ def convert_file_to_markdown(
             build_front_matter(
                 input_file=input_file,
                 model=model,
-                table_format=table_format,
-                inline_tables=inline_tables and (table_format == "html"),
-                extract_header=extract_header,
-                extract_footer=extract_footer,
-                include_image_base64=include_image_base64,
                 ocr_result=ocr_result,
             )
             + rewritten_markdown.lstrip()

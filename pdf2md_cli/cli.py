@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import os
+import re
 import sys
+from difflib import get_close_matches
 from pathlib import Path
 
 from pdf2md_cli.auth import error, load_api_key
@@ -11,159 +14,364 @@ from pdf2md_cli.feature_flags import mock_backend_enabled
 from pdf2md_cli.inputs import expand_inputs, validate_input_paths
 from pdf2md_cli.pipeline import convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
-from pdf2md_cli.types import Progress
+from pdf2md_cli.types import Progress, TableFormat
 from pdf2md_cli.ui import Spinner
 
 DEFAULT_OCR_MODEL = "mistral-ocr-latest"
 
+_TABLE_HELP = """\
+Table behavior (Mistral OCR):
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+| Flags | Mistral `table_format` | Markdown output | Sidecar files |
+| --- | --- | --- | --- |
+| (default) `--table-format html` | `html` | HTML tables are inlined | none |
+| `--table-format markdown` | (not sent) | Tables stay inline as markdown | none |
+| `--extract-table --table-format html` | `html` | Links to `tbl-*.html` | writes `tbl-*.html` |
+| `--extract-table --table-format markdown` | `markdown` | Links to `tbl-*.md` | writes `tbl-*.md` |
+"""
+
+_ANSI_RESET = "\x1b[0m"
+
+
+def _ansi(text: str, code: str) -> str:
+    return f"\x1b[{code}m{text}{_ANSI_RESET}"
+
+
+def _color_enabled(file: object) -> bool:
+    # Respect https://no-color.org/ and common CLICOLOR conventions.
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    if os.environ.get("CLICOLOR") == "0":
+        return False
+    if os.environ.get("CLICOLOR_FORCE") not in (None, "", "0"):
+        return True
+    term = os.environ.get("TERM", "")
+    if term.lower() == "dumb":
+        return False
+    isatty = getattr(file, "isatty", None)
+    return bool(isatty and isatty())
+
+
+_RE_FLAG = re.compile(r"(^|[\s\[,(/])(--?[A-Za-z0-9][A-Za-z0-9-]*)(?![\w-])")
+_RE_METAVAR = re.compile(r"\b([A-Z][A-Z0-9_-]{1,})\b")
+
+
+def _reorder_help_sections(text: str) -> str:
+    """Move 'Examples:' above 'options:' for easier scanning."""
+    lines = text.splitlines(keepends=True)
+
+    def _is_heading(line: str) -> bool:
+        stripped = line.strip()
+        return bool(stripped) and (not line.startswith((" ", "\t"))) and stripped.endswith(":")
+
+    def _find_line(pred) -> int | None:
+        for i, ln in enumerate(lines):
+            if pred(ln):
+                return i
+        return None
+
+    examples_i = _find_line(lambda ln: ln.strip() == "Examples:")
+    options_i = _find_line(lambda ln: ln.strip() == "options:")
+    if examples_i is None or options_i is None or examples_i < options_i:
+        return text
+
+    # Slice the Examples block until the next heading (e.g. "Help topics:") or EOF.
+    end = examples_i + 1
+    while end < len(lines) and not _is_heading(lines[end]):
+        end += 1
+    examples_block = lines[examples_i:end]
+    del lines[examples_i:end]
+
+    # Re-find options after deletion and insert Examples before it.
+    options_i = _find_line(lambda ln: ln.strip() == "options:")
+    if options_i is None:
+        return "".join(lines) + "".join(examples_block)
+    lines[options_i:options_i] = examples_block + (["\n"] if examples_block and not examples_block[-1].endswith("\n") else [])
+    return "".join(lines)
+
+
+def _colorize_help(text: str) -> str:
+    in_examples = False
+
+    def _color_line(line: str) -> str:
+        nonlocal in_examples
+        stripped = line.lstrip()
+
+        # Headings like "usage:", "options:", "Input/Output:".
+        if line and not line.startswith((" ", "\t")) and stripped.rstrip().endswith(":"):
+            label = stripped.rstrip()
+            if label == "Examples:":
+                in_examples = True
+                return line[: len(line) - len(stripped)] + _ansi(label, "1;35") + line[len(line.rstrip()) :]
+            in_examples = False
+            return line[: len(line) - len(stripped)] + _ansi(label, "1;36") + line[len(line.rstrip()) :]
+
+        # "usage: ..." line
+        if stripped.startswith("usage:"):
+            prefix, rest = stripped.split(":", 1)
+            colored = _ansi(f"{prefix}:", "1;36") + rest
+            return line[: len(line) - len(stripped)] + colored
+
+        # Option lines usually start with indentation then "-" or "--".
+        if stripped.startswith("-"):
+            line = _RE_FLAG.sub(lambda m: f"{m.group(1)}{_ansi(m.group(2), '32')}", line)  # green
+            line = _RE_METAVAR.sub(lambda m: _ansi(m.group(1), "33"), line)  # yellow
+            return line
+
+        # Example command lines.
+        if in_examples and (stripped.startswith("2md ") or stripped.startswith("$ 2md ")):
+            return _ansi(line.rstrip("\n"), "35") + ("\n" if line.endswith("\n") else "")
+
+        return line
+
+    return "".join(_color_line(ln) for ln in text.splitlines(keepends=True))
+
+
+class _FriendlyArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:  # noqa: A003
+        error(message)
+
+        unknown: list[str] = []
+        prefix = "unrecognized arguments:"
+        if prefix in message:
+            tail = message.split(prefix, 1)[1]
+            unknown = [tok.strip() for tok in tail.split() if tok.strip().startswith("-")]
+
+        if unknown:
+            known = sorted(self._option_string_actions.keys())
+            for tok in unknown:
+                suggestions = get_close_matches(tok, known, n=3, cutoff=0.6)
+                if suggestions:
+                    error(f"Did you mean: {', '.join(suggestions)} ?")
+
+        error("Run `2md -h` for help, or `2md help` for topics.")
+        raise SystemExit(2)
+
+    def print_help(self, file=None) -> None:  # type: ignore[override]
+        if file is None:
+            file = sys.stdout
+        msg = _reorder_help_sections(self.format_help())
+        if _color_enabled(file):
+            msg = _colorize_help(msg)
+        self._print_message(msg, file)
+
+    def print_usage(self, file=None) -> None:  # type: ignore[override]
+        if file is None:
+            file = sys.stdout
+        msg = self.format_usage()
+        if _color_enabled(file):
+            msg = _colorize_help(msg)
+        self._print_message(msg, file)
+
+
+def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
     enable_mock = mock_backend_enabled()
-    parser = argparse.ArgumentParser(
-        description=(
-            "Convert one or more PDFs/images to Markdown using Mistral OCR. Images are saved alongside "
-            "the produced markdown files. Batch runs are processed concurrently."
-        )
+    parser = _FriendlyArgumentParser(
+        prog="2md",
+        formatter_class=argparse.RawTextHelpFormatter,
+        description="Convert PDFs/images to Markdown using Mistral OCR.",
+        epilog=(
+            "Examples:\n"
+            "  2md file.pdf\n"
+            "  2md docs/*.pdf --workers 4\n"
+            "  2md file.pdf -o out\n"
+            "  2md file.pdf --table-format markdown\n"
+            "  2md file.pdf --extract-table --table-format html\n"
+            "  2md file.pdf --extract-table --table-format markdown\n"
+            "\n"
+            "Help topics:\n"
+            "  2md help tables\n"
+            "  2md help advanced\n"
+        ),
     )
-    parser.add_argument(
+
+    io_group = parser.add_argument_group("Input/Output")
+    io_group.add_argument(
         "files",
         nargs="+",
-        help="One or more files to process (PDF or supported image; supports glob patterns, e.g. docs/*.*)",
+        help="One or more files (PDF or supported image); supports glob patterns (e.g. docs/*.*)",
     )
-    parser.add_argument(
+    io_group.add_argument(
         "-o",
         "--outdir",
         type=Path,
         default=None,
         help=(
-            "Output directory. For a single file, this is the exact output folder. "
-            "For multiple files, this folder is used as a base and each file writes to "
-            "<outdir>/<input_stem>_ocr. Default: <INPUT_DIR>/<INPUT_STEM>_ocr"
+            "Output directory.\n"
+            "  - single file: exact output folder\n"
+            "  - multiple files: base folder; writes <outdir>/<input_stem>_ocr\n"
+            "Default: <INPUT_DIR>/<INPUT_STEM>_ocr"
         ),
     )
-    parser.add_argument(
+
+    backend_group = parser.add_argument_group("Backend")
+    backend_group.add_argument(
         "--backend",
         choices=(["mistral", "mock"] if enable_mock else ["mistral"]),
         default="mistral",
         help="OCR backend to use (default: mistral)",
     )
-    parser.add_argument(
+    backend_group.add_argument(
         "--api-key",
         dest="api_key",
         default=None,
         help="Mistral API key (or set MISTRAL_API_KEY env var); required for --backend mistral",
     )
-    parser.add_argument(
+    backend_group.add_argument(
+        "--model",
+        default=DEFAULT_OCR_MODEL,
+        help=f"OCR model to use (default: {DEFAULT_OCR_MODEL})",
+    )
+    backend_group.add_argument(
+        "--keep-remote-file",
+        action="store_true",
+        help="(mistral) Do not delete uploaded PDFs from Mistral after OCR completes",
+    )
+
+    perf_group = parser.add_argument_group("Performance")
+    perf_group.add_argument(
         "--workers",
         type=int,
         default=None,
         help="Number of concurrent workers (default: min(16, number of files))",
     )
-    parser.add_argument(
-        "--model",
-        default=DEFAULT_OCR_MODEL,
-        help=f"OCR model to use (default: {DEFAULT_OCR_MODEL})",
+
+    tables_group = parser.add_argument_group("Tables")
+    tables_group.add_argument(
+        "--extract-table",
+        action="store_true",
+        help="Extract tables into separate files and keep links like [tbl-3.html](tbl-3.html)",
     )
-    parser.add_argument(
+    tables_group.add_argument(
+        "--table-format",
+        choices=["html", "markdown"],
+        default="html",
+        help=(
+            "(mistral) Table formatting mode (default: html).  \n"
+            "See: `2md help tables`"
+        ),
+    )
+
+    reliability_group = parser.add_argument_group("Reliability")
+    reliability_group.add_argument(
         "--retries",
         type=int,
         default=5,
         help="Number of retries for transient failures (default: 5; 0 disables retries)",
     )
-    parser.add_argument(
-        "--backoff-initial-ms",
-        type=int,
-        default=500,
-        help="Initial backoff delay in milliseconds (default: 500)",
-    )
-    parser.add_argument(
-        "--backoff-max-ms",
-        type=int,
-        default=20000,
-        help="Maximum backoff delay in milliseconds (default: 20000)",
-    )
-    parser.add_argument(
-        "--backoff-multiplier",
-        type=float,
-        default=2.0,
-        help="Backoff multiplier per retry (default: 2.0)",
-    )
-    parser.add_argument(
-        "--backoff-jitter",
-        type=float,
-        default=0.2,
-        help="Jitter fraction added to delays (0..1, default: 0.2)",
-    )
-    parser.add_argument(
-        "--keep-remote-file",
-        action="store_true",
-        help="(mistral backend) Do not delete the uploaded file from Mistral after OCR completes",
-    )
-    parser.add_argument(
-        "--table-format",
-        choices=["null", "markdown", "html"],
-        default="html",
-        help="(mistral backend) Table extraction format (default: html; use 'null' to disable separate table extraction)",
-    )
-    parser.add_argument(
-        "--no-inline-tables",
-        action="store_true",
-        help="Do not inline extracted HTML tables into the markdown (keep links like [tbl-3.html](tbl-3.html))",
-    )
-    parser.add_argument(
-        "--no-front-matter",
-        action="store_true",
-        help="Do not add YAML front matter metadata to the top of the markdown output",
-    )
-    parser.add_argument(
-        "--no-page-markers",
-        action="store_true",
-        help="Do not insert per-page markers like <!-- page: N --> when concatenating OCR pages",
-    )
-    parser.add_argument(
-        "--extract-header",
-        action="store_true",
-        help="(mistral backend) Extract headers separately (writes <stem>_headers_footers.md when present)",
-    )
-    parser.add_argument(
-        "--extract-footer",
-        action="store_true",
-        help="(mistral backend) Extract footers separately (writes <stem>_headers_footers.md when present)",
-    )
-    parser.add_argument(
-        "--no-image-base64",
-        action="store_true",
-        help="(mistral backend) Do not request image base64 payloads from OCR (image placeholders may be blank)",
-    )
 
-    if enable_mock:
-        # Mock-only knobs for UX testing.
-        parser.add_argument(
-            "--mock-pages",
+    if advanced:
+        advanced_group = parser.add_argument_group("Advanced")
+        advanced_group.add_argument(
+            "--backoff-initial-ms",
             type=int,
-            default=1,
-            help="(mock backend) Number of pages to generate (default: 1)",
+            default=500,
+            help="Initial backoff delay in milliseconds (default: 500)",
         )
-        parser.add_argument(
-            "--mock-images",
+        advanced_group.add_argument(
+            "--backoff-max-ms",
             type=int,
-            default=1,
-            help="(mock backend) Images per page to generate (default: 1)",
+            default=20000,
+            help="Maximum backoff delay in milliseconds (default: 20000)",
         )
-        parser.add_argument(
-            "--mock-delay-ms",
-            type=int,
-            default=0,
-            help="(mock backend) Artificial delay per file in milliseconds (default: 0)",
+        advanced_group.add_argument(
+            "--backoff-multiplier",
+            type=float,
+            default=2.0,
+            help="Backoff multiplier per retry (default: 2.0)",
         )
-        parser.add_argument(
-            "--mock-fail-first",
-            type=int,
-            default=0,
-            help="(mock backend) Fail N times before succeeding to exercise retries (default: 0)",
+        advanced_group.add_argument(
+            "--backoff-jitter",
+            type=float,
+            default=0.2,
+            help="Jitter fraction added to delays (0..1, default: 0.2)",
+        )
+        advanced_group.add_argument(
+            "--no-front-matter",
+            action="store_true",
+            help="Do not add YAML front matter metadata to the top of the markdown output",
+        )
+        advanced_group.add_argument(
+            "--no-page-markers",
+            action="store_true",
+            help="Do not insert per-page markers like <!-- page: N --> when concatenating OCR pages",
+        )
+        advanced_group.add_argument(
+            "--extract-header",
+            action="store_true",
+            help="(mistral) Extract headers separately (writes <stem>_headers_footers.md when present)",
+        )
+        advanced_group.add_argument(
+            "--extract-footer",
+            action="store_true",
+            help="(mistral) Extract footers separately (writes <stem>_headers_footers.md when present)",
+        )
+        advanced_group.add_argument(
+            "--no-image-base64",
+            action="store_true",
+            help="(mistral) Do not request image base64 payloads from OCR (image placeholders may be blank)",
         )
 
-    return parser.parse_args(argv)
+        if enable_mock:
+            mock_group = parser.add_argument_group("Mock backend (advanced)")
+            mock_group.add_argument(
+                "--mock-pages",
+                type=int,
+                default=1,
+                help="(mock) Number of pages to generate (default: 1)",
+            )
+            mock_group.add_argument(
+                "--mock-images",
+                type=int,
+                default=1,
+                help="(mock) Images per page to generate (default: 1)",
+            )
+            mock_group.add_argument(
+                "--mock-delay-ms",
+                type=int,
+                default=0,
+                help="(mock) Artificial delay per file in milliseconds (default: 0)",
+            )
+            mock_group.add_argument(
+                "--mock-fail-first",
+                type=int,
+                default=0,
+                help="(mock) Fail N times before succeeding to exercise retries (default: 0)",
+            )
+    else:
+        parser.add_argument("--backoff-initial-ms", type=int, default=500, help=argparse.SUPPRESS)
+        parser.add_argument("--backoff-max-ms", type=int, default=20000, help=argparse.SUPPRESS)
+        parser.add_argument("--backoff-multiplier", type=float, default=2.0, help=argparse.SUPPRESS)
+        parser.add_argument("--backoff-jitter", type=float, default=0.2, help=argparse.SUPPRESS)
+        parser.add_argument("--no-front-matter", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument("--no-page-markers", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument("--extract-header", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument("--extract-footer", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument("--no-image-base64", action="store_true", help=argparse.SUPPRESS)
+
+        if enable_mock:
+            parser.add_argument("--mock-pages", type=int, default=1, help=argparse.SUPPRESS)
+            parser.add_argument("--mock-images", type=int, default=1, help=argparse.SUPPRESS)
+            parser.add_argument("--mock-delay-ms", type=int, default=0, help=argparse.SUPPRESS)
+            parser.add_argument("--mock-fail-first", type=int, default=0, help=argparse.SUPPRESS)
+
+    return parser
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return _build_parser(advanced=False).parse_args(argv)
+
+
+def _parse_args_advanced(argv: list[str] | None = None) -> argparse.Namespace:
+    return _build_parser(advanced=True).parse_args(argv)
+
+
+def _print_tables_help() -> None:
+    print(_TABLE_HELP)
+
+
+def _print_advanced_help() -> None:
+    _build_parser(advanced=True).print_help()
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -193,8 +401,31 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+
+    if raw_argv and raw_argv[0] == "help":
+        topic = raw_argv[1] if len(raw_argv) > 1 else ""
+        if topic in {"tables", "table"}:
+            _print_tables_help()
+            return
+        if topic in {"advanced", "adv"}:
+            _print_advanced_help()
+            return
+        if topic == "":
+            _build_parser(advanced=False).print_help()
+            return
+        error(f"Unknown help topic: {topic!r} (try: tables, advanced)")
+        raise SystemExit(2)
+
+    if "--help-tables" in raw_argv:
+        _print_tables_help()
+        return
+    if "--help-advanced" in raw_argv:
+        _print_advanced_help()
+        return
+
     try:
-        args = _parse_args(argv)
+        args = _parse_args(raw_argv)
         _validate_args(args)
     except ValueError as e:
         error(str(e))
@@ -230,6 +461,20 @@ def main(argv: list[str] | None = None) -> None:
         )
         runner = make_mock_runner(mock=mock_cfg, backoff=backoff)
 
+    parsed_table_format = TableFormat(args.table_format)
+
+    table_format: TableFormat | None
+    inline_tables: bool
+    if parsed_table_format == TableFormat.HTML:
+        table_format = TableFormat.HTML
+        inline_tables = not bool(args.extract_table)
+    else:
+        # markdown mode:
+        # - default (no --extract-table): keep tables inline (API default => do not send table_format)
+        # - with --extract-table: request extracted markdown tables separately
+        table_format = TableFormat.MARKDOWN if bool(args.extract_table) else None
+        inline_tables = False
+
     # Single-file path: keep spinner UX.
     if len(input_files) == 1:
         input_path = input_files[0]
@@ -244,13 +489,13 @@ def main(argv: list[str] | None = None) -> None:
                 runner=runner,
                 model=args.model,
                 delete_remote_file=not args.keep_remote_file,
-                table_format=None if args.table_format == "null" else args.table_format,
+                table_format=table_format,
                 extract_header=bool(args.extract_header),
                 extract_footer=bool(args.extract_footer),
                 include_image_base64=not bool(args.no_image_base64),
                 add_front_matter=not bool(args.no_front_matter),
                 add_page_markers=not bool(args.no_page_markers),
-                inline_tables=not bool(args.no_inline_tables),
+                inline_tables=inline_tables,
                 progress=Progress(spinner.update),
             )
             spinner.stop(clear=True)
@@ -287,13 +532,13 @@ def main(argv: list[str] | None = None) -> None:
                 runner=runner,
                 model=args.model,
                 delete_remote_file=not args.keep_remote_file,
-                table_format=None if args.table_format == "null" else args.table_format,
+                table_format=table_format,
                 extract_header=bool(args.extract_header),
                 extract_footer=bool(args.extract_footer),
                 include_image_base64=not bool(args.no_image_base64),
                 add_front_matter=not bool(args.no_front_matter),
                 add_page_markers=not bool(args.no_page_markers),
-                inline_tables=not bool(args.no_inline_tables),
+                inline_tables=inline_tables,
                 progress=Progress(_progress),
             )
             return res.markdown_path, None
@@ -319,13 +564,17 @@ def main(argv: list[str] | None = None) -> None:
         spinner.stop(clear=True)
 
     failed = False
+    ok = 0
     for (md_path, maybe_err), original_input in zip(results, input_files):
         if maybe_err is None:
             print(str(md_path))
+            ok += 1
         else:
             failed = True
             error(f"Failed to process {original_input}: {maybe_err}")
 
+    fail = total_files - ok
+    print(f"Done: {ok}/{total_files} succeeded, {fail} failed.", file=sys.stderr)
     if failed:
         raise SystemExit(1)
 
