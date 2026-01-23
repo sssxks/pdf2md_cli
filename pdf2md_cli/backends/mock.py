@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from pdf2md_cli.pipeline import OcrRunner
 from pdf2md_cli.retry import BackoffConfig, with_backoff
-from pdf2md_cli.types import OcrImage, OcrPage, OcrResult, ProgressFn
+from pdf2md_cli.types import OcrImage, OcrPage, OcrResult, Progress
 
 
 _TINY_PNG_BASE64 = (
@@ -31,7 +31,7 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
         delete_remote_file: bool,
         input_kind: str,
         mime_type: str | None,
-        progress: ProgressFn | None,
+        progress: Progress,
     ) -> OcrResult:
         # Parameters exist to match the real runner; most are unused but useful for UX parity.
         _ = (file_name, content, model, delete_remote_file, input_kind, mime_type)
@@ -46,8 +46,7 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
                 raise RuntimeError("mock timeout")
 
             if mock.delay_ms > 0:
-                if progress:
-                    progress(f"Mock backend sleeping {mock.delay_ms}ms...")
+                progress.emit_lazy(lambda: f"Mock backend sleeping {mock.delay_ms}ms...")
                 time.sleep(mock.delay_ms / 1000.0)
 
             pages: list[OcrPage] = []

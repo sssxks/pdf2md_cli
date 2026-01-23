@@ -5,7 +5,7 @@ from pathlib import Path
 from pdf2md_cli.backends.mistral import make_mistral_runner
 from pdf2md_cli.pipeline import convert_pdf_to_markdown
 from pdf2md_cli.retry import BackoffConfig
-from pdf2md_cli.types import ProgressFn
+from pdf2md_cli.types import NO_PROGRESS, Progress
 
 DEFAULT_OCR_MODEL = "mistral-ocr-2505"
 
@@ -22,7 +22,7 @@ def convert_pdf_to_markdown_mistral(
     backoff_max_s: float = 20.0,
     backoff_multiplier: float = 2.0,
     backoff_jitter: float = 0.2,
-    progress: ProgressFn | None = None,
+    progress: Progress = NO_PROGRESS,
 ) -> tuple[Path, dict[str, str]]:
     backoff = BackoffConfig(
         max_retries=max_retries,

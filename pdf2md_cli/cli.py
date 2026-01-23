@@ -11,6 +11,7 @@ from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
 from pdf2md_cli.inputs import expand_inputs, validate_input_paths
 from pdf2md_cli.pipeline import convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
+from pdf2md_cli.types import Progress
 from pdf2md_cli.ui import Spinner
 
 DEFAULT_OCR_MODEL = "mistral-ocr-2505"
@@ -201,7 +202,7 @@ def main(argv: list[str] | None = None) -> None:
                 runner=runner,
                 model=args.model,
                 delete_remote_file=not args.keep_remote_file,
-                progress=spinner.update,
+                progress=Progress(spinner.update),
             )
             spinner.stop(clear=True)
         except Exception as e:  # noqa: BLE001
@@ -237,7 +238,7 @@ def main(argv: list[str] | None = None) -> None:
                 runner=runner,
                 model=args.model,
                 delete_remote_file=not args.keep_remote_file,
-                progress=_progress,
+                progress=Progress(_progress),
             )
             return res.markdown_path, None
         except Exception as e:  # noqa: BLE001

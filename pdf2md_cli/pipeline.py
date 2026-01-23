@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from pdf2md_cli.types import OcrResult, ProgressFn
+from pdf2md_cli.types import NO_PROGRESS, OcrResult, Progress
 
 
 class OcrRunner(Protocol):
@@ -19,7 +19,7 @@ class OcrRunner(Protocol):
         delete_remote_file: bool,
         input_kind: str,
         mime_type: str | None,
-        progress: ProgressFn | None,
+        progress: Progress,
     ) -> OcrResult: ...
 
 
@@ -144,7 +144,7 @@ def convert_pdf_to_markdown(
     runner: OcrRunner,
     model: str,
     delete_remote_file: bool,
-    progress: ProgressFn | None = None,
+    progress: Progress = NO_PROGRESS,
 ) -> ConvertResult:
     input_kind, _mime_type = _classify_input(pdf_file)
     if input_kind != "pdf":
@@ -181,18 +181,16 @@ def convert_file_to_markdown(
     runner: OcrRunner,
     model: str,
     delete_remote_file: bool,
-    progress: ProgressFn | None = None,
+    progress: Progress = NO_PROGRESS,
 ) -> ConvertResult:
     input_kind, mime_type = _classify_input(input_file)
 
     ensure_outdir(outdir)
 
-    if progress:
-        progress("Reading input...")
+    progress.emit("Reading input...")
     content = input_file.read_bytes()
 
-    if progress:
-        progress("Running OCR...")
+    progress.emit("Running OCR...")
     ocr_result = runner(
         file_name=input_file.name,
         content=content,
@@ -205,8 +203,7 @@ def convert_file_to_markdown(
 
     markdown_text = "\n\n".join(page.markdown for page in ocr_result.pages).strip()
 
-    if progress:
-        progress("Saving images and markdown...")
+    progress.emit("Saving images and markdown...")
     stem = input_file.stem
     id_to_filename = decode_and_save_images(ocr_result, outdir, stem)
     rewritten_markdown = rewrite_markdown(markdown_text, id_to_filename)

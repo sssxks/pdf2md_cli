@@ -8,6 +8,7 @@ from pathlib import Path
 from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
 from pdf2md_cli.pipeline import convert_file_to_markdown, convert_pdf_to_markdown
 from pdf2md_cli.retry import BackoffConfig
+from pdf2md_cli.types import NO_PROGRESS
 
 
 class TestMockBackend(unittest.TestCase):
@@ -29,7 +30,7 @@ class TestMockBackend(unittest.TestCase):
                 runner=runner,
                 model="mock-model",
                 delete_remote_file=True,
-                progress=None,
+                progress=NO_PROGRESS,
             )
 
             self.assertTrue(res.markdown_path.exists())
@@ -59,7 +60,7 @@ class TestMockBackend(unittest.TestCase):
                 runner=runner,
                 model="mock-model",
                 delete_remote_file=True,
-                progress=None,
+                progress=NO_PROGRESS,
             )
             self.assertTrue(res.markdown_path.exists())
 
@@ -86,7 +87,7 @@ class TestMockBackend(unittest.TestCase):
                 runner=runner,
                 model="mock-model",
                 delete_remote_file=True,
-                progress=None,
+                progress=NO_PROGRESS,
             )
 
             self.assertTrue(res.markdown_path.exists())
@@ -114,7 +115,7 @@ class TestMockBackend(unittest.TestCase):
                     runner=runner,
                     model="mock-model",
                     delete_remote_file=True,
-                    progress=None,
+                    progress=NO_PROGRESS,
                 )
 
 

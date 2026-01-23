@@ -6,7 +6,7 @@ from mistralai import Mistral
 
 from pdf2md_cli.pipeline import OcrRunner
 from pdf2md_cli.retry import BackoffConfig, with_backoff
-from pdf2md_cli.types import OcrImage, OcrPage, OcrResult, ProgressFn
+from pdf2md_cli.types import OcrImage, OcrPage, OcrResult, Progress
 
 
 def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
@@ -18,7 +18,7 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
         delete_remote_file: bool,
         input_kind: str,
         mime_type: str | None,
-        progress: ProgressFn | None,
+        progress: Progress,
     ) -> OcrResult:
         with Mistral(api_key=api_key) as client:
             uploaded_file_id: str | None = None
@@ -26,11 +26,9 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
             if input_kind == "image":
                 if not mime_type:
                     raise ValueError("mime_type is required for image inputs")
-                if progress:
-                    progress("Encoding image...")
+                progress.emit("Encoding image...")
                 b64 = base64.b64encode(content).decode("utf-8")
-                if progress:
-                    progress("Running OCR (this can take a while)...")
+                progress.emit("Running OCR (this can take a while)...")
                 ocr_response = with_backoff(
                     lambda: client.ocr.process(
                         model=model,
@@ -43,8 +41,7 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                 )
             elif input_kind == "pdf":
                 try:
-                    if progress:
-                        progress("Uploading PDF...")
+                    progress.emit("Uploading PDF...")
 
                     uploaded = with_backoff(
                         lambda: client.files.upload(
@@ -76,8 +73,7 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                     if not doc_url:
                         raise RuntimeError(f"Signed URL request returned no url: {signed!r}")
 
-                    if progress:
-                        progress("Running OCR (this can take a while)...")
+                    progress.emit("Running OCR (this can take a while)...")
 
                     ocr_response = with_backoff(
                         lambda: client.ocr.process(

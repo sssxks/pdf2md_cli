@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, TypeVar
 
-from pdf2md_cli.types import ProgressFn
+from pdf2md_cli.types import NO_PROGRESS, Progress
 
 T = TypeVar("T")
 
@@ -130,7 +130,7 @@ def with_backoff(
     *,
     what: str,
     cfg: BackoffConfig,
-    progress: ProgressFn | None = None,
+    progress: Progress = NO_PROGRESS,
     sleep_fn: Callable[[float], None] = time.sleep,
     rng: random.Random = random,
 ) -> T:
@@ -170,13 +170,15 @@ def with_backoff(
                 sleep_s *= rng.uniform(1.0 - jitter, 1.0 + jitter)
                 sleep_s = _clamp(sleep_s, 0.0, cfg.max_delay_s)
 
-            if progress:
+            def _msg() -> str:
                 status = _get_status_code_from_exc(e)
                 status_txt = f" status={status}" if status is not None else ""
-                progress(
+                return (
                     f"{what} failed{status_txt} ({type(e).__name__}: {e}); "
                     f"retrying in {sleep_s:.1f}s (attempt {attempt}/{cfg.max_retries})..."
                 )
+
+            progress.emit_lazy(_msg)
 
             sleep_fn(sleep_s)
             delay_s = _clamp(delay_s * cfg.multiplier, 0.0, cfg.max_delay_s)
