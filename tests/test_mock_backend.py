@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import tempfile
 import unittest
 import base64
@@ -28,7 +29,6 @@ class TestMockBackend(unittest.TestCase):
             table_format: TableFormat | None,
             extract_header: bool,
             extract_footer: bool,
-            include_image_base64: bool,
             progress: object,
         ) -> OcrResult:
             _ = (
@@ -40,7 +40,6 @@ class TestMockBackend(unittest.TestCase):
                 table_format,
                 extract_header,
                 extract_footer,
-                include_image_base64,
                 progress,
             )
             self.assertEqual(input_kind, InputKind.DOCUMENT)
@@ -125,7 +124,6 @@ class TestMockBackend(unittest.TestCase):
             table_format: TableFormat | None,
             extract_header: bool,
             extract_footer: bool,
-            include_image_base64: bool,
             progress: object,
         ) -> OcrResult:
             _ = (
@@ -138,7 +136,6 @@ class TestMockBackend(unittest.TestCase):
                 table_format,
                 extract_header,
                 extract_footer,
-                include_image_base64,
                 progress,
             )
             return OcrResult(
@@ -170,7 +167,6 @@ class TestMockBackend(unittest.TestCase):
                 model="mock-model",
                 delete_remote_file=True,
                 table_format=TableFormat.HTML,
-                inline_tables=True,
                 progress=NO_PROGRESS,
             )
 
@@ -291,6 +287,97 @@ class TestMockBackend(unittest.TestCase):
             tbl_path = outdir / "tbl-1.md"
             self.assertTrue(tbl_path.exists())
             self.assertIn("| A | B |", tbl_path.read_text(encoding="utf-8"))
+
+    def test_cli_header_comment_extracts_and_comments_back(self) -> None:
+        os.environ["PDF2MD_ENABLE_MOCK"] = "1"
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            pdf_path = tmp / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n%mock\n")
+
+            outdir = tmp / "out"
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cli_main(
+                    [
+                        str(pdf_path),
+                        "-o",
+                        str(outdir),
+                        "--backend",
+                        "mock",
+                        "--mock-pages",
+                        "1",
+                        "--mock-images",
+                        "0",
+                        "--header",
+                        "comment",
+                        "--footer",
+                        "comment",
+                    ]
+                )
+
+            md_path = outdir / "sample.md"
+            self.assertTrue(md_path.exists())
+            md = md_path.read_text(encoding="utf-8")
+
+            self.assertIn("<!-- header: page 1", md)
+            self.assertIn("Mock Header (page 1)", md)
+            self.assertIn("<!-- footer: page 1", md)
+            self.assertIn("Mock Footer (page 1)", md)
+
+            # In comment mode, do not keep the inline header/footer text in the rendered markdown body.
+            md_without_comments = re.sub(r"<!--.*?-->", "", md, flags=re.S)
+            self.assertNotIn("Mock Header (page 1)", md_without_comments)
+            self.assertNotIn("Mock Footer (page 1)", md_without_comments)
+
+            # Comment mode should not write the sidecar file.
+            self.assertFalse((outdir / "sample_headers_footers.md").exists())
+
+    def test_cli_header_extract_writes_sidecar_and_does_not_comment(self) -> None:
+        os.environ["PDF2MD_ENABLE_MOCK"] = "1"
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            pdf_path = tmp / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n%mock\n")
+
+            outdir = tmp / "out"
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cli_main(
+                    [
+                        str(pdf_path),
+                        "-o",
+                        str(outdir),
+                        "--backend",
+                        "mock",
+                        "--mock-pages",
+                        "1",
+                        "--mock-images",
+                        "0",
+                        "--header",
+                        "extract",
+                        "--footer",
+                        "extract",
+                    ]
+                )
+
+            md_path = outdir / "sample.md"
+            self.assertTrue(md_path.exists())
+            md = md_path.read_text(encoding="utf-8")
+            self.assertNotIn("<!-- header: page 1", md)
+            self.assertNotIn("<!-- footer: page 1", md)
+            self.assertNotIn("Mock Header (page 1)", md)
+            self.assertNotIn("Mock Footer (page 1)", md)
+
+            extras_path = outdir / "sample_headers_footers.md"
+            self.assertTrue(extras_path.exists())
+            extras = extras_path.read_text(encoding="utf-8")
+            self.assertIn("## Page 1 header", extras)
+            self.assertIn("Mock Header (page 1)", extras)
+            self.assertIn("## Page 1 footer", extras)
+            self.assertIn("Mock Footer (page 1)", extras)
 
     def test_mock_backend_writes_markdown_and_images(self) -> None:
         runner = make_mock_runner(

@@ -4,7 +4,8 @@ import base64
 import json
 import urllib.error
 import urllib.request
-from typing import Mapping
+from collections.abc import Mapping
+from typing import cast
 
 from mistralai import Mistral
 
@@ -33,7 +34,10 @@ class _HttpStatusError(RuntimeError):
         self.response = _HttpResponseLike(status_code=status_code, headers=headers)
 
 
-def _post_json(*, url: str, api_key: str, payload: dict[str, object], timeout_s: float = 120.0) -> dict:
+def _post_json(
+    *, url: str, api_key: str, payload: Mapping[str, object], timeout_s: float = 120.0
+) -> dict[str, object]:
+    """Send a JSON POST request and decode the response as a JSON object."""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url=url,
@@ -48,7 +52,7 @@ def _post_json(*, url: str, api_key: str, payload: dict[str, object], timeout_s:
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310
             raw = resp.read()
-            return json.loads(raw.decode("utf-8"))
+            return cast(dict[str, object], json.loads(raw.decode("utf-8")))
     except urllib.error.HTTPError as e:
         body = ""
         try:
@@ -60,6 +64,24 @@ def _post_json(*, url: str, api_key: str, payload: dict[str, object], timeout_s:
 
 
 def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
+    """
+    Build an OCR runner backed by Mistral OCR + the Files API (for documents).
+
+    Behavior:
+        - Images are sent directly to the OCR API as a `data:` URL.
+        - Documents are uploaded to the Files API, a signed URL is obtained, then OCR is called.
+        - When `delete_remote_file=True`, uploaded documents are deleted best-effort after OCR.
+        - Transient failures are retried according to `backoff`.
+    """
+    def _get(obj: object, key: str, default: object | None = None) -> object | None:
+        if isinstance(obj, Mapping):
+            obj_map = cast(Mapping[str, object], obj)
+            return obj_map.get(key, default)
+        return cast(object | None, getattr(obj, key, default))
+
+    def _to_opt_str(v: object | None) -> str | None:
+        return None if v is None else str(v)
+
     def run(
         *,
         file_name: str,
@@ -71,7 +93,6 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
         table_format: TableFormat | None,
         extract_header: bool,
         extract_footer: bool,
-        include_image_base64: bool,
         progress: Progress,
     ) -> OcrResult:
         with Mistral(api_key=api_key) as client:
@@ -84,14 +105,14 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                 b64 = base64.b64encode(content).decode("utf-8")
                 progress.emit("Running OCR (this can take a while)...")
 
-                ocr_response = with_backoff(
+                ocr_response: dict[str, object] = with_backoff(
                     lambda: _post_json(
                         url="https://api.mistral.ai/v1/ocr",
                         api_key=api_key,
                         payload={
                             "model": model,
                             "document": {"type": "image_url", "image_url": f"data:{mime_type};base64,{b64}"},
-                            "include_image_base64": include_image_base64,
+                            "include_image_base64": True,
                             **({} if table_format is None else {"table_format": table_format.value}),
                             **({} if not extract_header else {"extract_header": True}),
                             **({} if not extract_footer else {"extract_footer": True}),
@@ -105,32 +126,34 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                 try:
                     progress.emit("Uploading document...")
 
-                    uploaded = with_backoff(
-                        lambda: client.files.upload(
+                    def _upload() -> object:
+                        return client.files.upload(
                             file={"file_name": file_name, "content": content},
                             purpose="ocr",
-                        ),
+                        )
+
+                    uploaded: object = with_backoff(
+                        _upload,
                         what="Upload document",
                         cfg=backoff,
                         progress=progress,
                     )
 
-                    uploaded_file_id_obj = getattr(uploaded, "id", None)
-                    if uploaded_file_id_obj is None and isinstance(uploaded, dict):
-                        uploaded_file_id_obj = uploaded.get("id")
+                    uploaded_file_id_obj = _get(uploaded, "id")
                     uploaded_file_id = str(uploaded_file_id_obj or "").strip()
                     if not uploaded_file_id:
                         raise RuntimeError(f"Upload succeeded but returned no file id: {uploaded!r}")
 
-                    signed = with_backoff(
-                        lambda: client.files.get_signed_url(file_id=uploaded_file_id),
+                    def _get_signed_url() -> object:
+                        return client.files.get_signed_url(file_id=uploaded_file_id)
+
+                    signed: object = with_backoff(
+                        _get_signed_url,
                         what="Get signed URL",
                         cfg=backoff,
                         progress=progress,
                     )
-                    doc_url_obj = getattr(signed, "url", None)
-                    if doc_url_obj is None and isinstance(signed, dict):
-                        doc_url_obj = signed.get("url")
+                    doc_url_obj = _get(signed, "url")
                     doc_url = str(doc_url_obj or "").strip()
                     if not doc_url:
                         raise RuntimeError(f"Signed URL request returned no url: {signed!r}")
@@ -144,7 +167,7 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                             payload={
                                 "model": model,
                                 "document": {"type": "document_url", "document_url": doc_url},
-                                "include_image_base64": include_image_base64,
+                                "include_image_base64": True,
                                 **({} if table_format is None else {"table_format": table_format.value}),
                                 **({} if not extract_header else {"extract_header": True}),
                                 **({} if not extract_footer else {"extract_footer": True}),
@@ -177,48 +200,32 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
             else:
                 raise ValueError(f"Unsupported input_kind: {input_kind!r}")
 
-        pages_src = ocr_response.get("pages", [])
+        pages_src_obj = ocr_response.get("pages", [])
+        pages_src: list[object] = cast(list[object], pages_src_obj) if isinstance(pages_src_obj, list) else []
 
         pages: list[OcrPage] = []
         for page in pages_src:
-            if isinstance(page, dict):
-                markdown = str(page.get("markdown", ""))
-                images_src = page.get("images", []) or []
-                tables_src = page.get("tables", []) or []
-                header = page.get("header")
-                footer = page.get("footer")
-            else:
-                markdown = str(getattr(page, "markdown", ""))
-                images_src = getattr(page, "images", []) or []
-                tables_src = getattr(page, "tables", []) or []
-                header = getattr(page, "header", None)
-                footer = getattr(page, "footer", None)
+            markdown = str(_get(page, "markdown", "") or "")
+            images_src_obj = _get(page, "images")
+            tables_src_obj = _get(page, "tables")
+            header = _to_opt_str(_get(page, "header"))
+            footer = _to_opt_str(_get(page, "footer"))
+
+            images_src: list[object] = cast(list[object], images_src_obj) if isinstance(images_src_obj, list) else []
+            tables_src: list[object] = cast(list[object], tables_src_obj) if isinstance(tables_src_obj, list) else []
 
             images: list[OcrImage] = []
             for img in images_src:
-                if isinstance(img, dict):
-                    images.append(OcrImage(id=str(img.get("id")), image_base64=img.get("image_base64")))
-                else:
-                    images.append(OcrImage(id=str(getattr(img, "id", "")), image_base64=getattr(img, "image_base64", None)))
+                image_id = str(_get(img, "id", "") or "")
+                image_base64 = _to_opt_str(_get(img, "image_base64"))
+                images.append(OcrImage(id=image_id, image_base64=image_base64))
 
             tables: list[OcrTable] = []
             for tbl in tables_src:
-                if isinstance(tbl, dict):
-                    tables.append(
-                        OcrTable(
-                            id=str(tbl.get("id", "")),
-                            content=str(tbl.get("content", "")),
-                            format=tbl.get("format"),
-                        )
-                    )
-                else:
-                    tables.append(
-                        OcrTable(
-                            id=str(getattr(tbl, "id", "")),
-                            content=str(getattr(tbl, "content", "")),
-                            format=getattr(tbl, "format", None),
-                        )
-                    )
+                table_id = str(_get(tbl, "id", "") or "")
+                table_content = str(_get(tbl, "content", "") or "")
+                fmt = _to_opt_str(_get(tbl, "format"))
+                tables.append(OcrTable(id=table_id, content=table_content, format=fmt))
 
             pages.append(OcrPage(markdown=markdown, images=images, tables=tables, header=header, footer=footer))
 

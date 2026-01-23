@@ -2,6 +2,20 @@
 
 Convert one or more documents/images to Markdown using **Mistral OCR**.
 
+### Use as a library
+
+```python
+from pdf2md_cli import ConvertOptions, convert_file, convert_files
+
+# single file
+res = convert_file("docs/sample.pdf", api_key="...", outdir="out")
+print(res.markdown_path)
+
+# batch (supports globs)
+batch = convert_files(["docs/*.pdf", "docs/*.png"], api_key="...", outdir="out", workers=4)
+print(len(batch.succeeded), len(batch.failed))
+```
+
 ### Install (uv)
 
 ```bash
@@ -52,6 +66,14 @@ Table handling behavior:
 | `--table-format markdown` | *(not sent)* | Tables stay inline as markdown | none |
 | `--extract-table --table-format html` | `html` | Links to `tbl-*.html` | writes `tbl-*.html` |
 | `--extract-table --table-format markdown` | `markdown` | Links to `tbl-*.md` | writes `tbl-*.md` |
+
+Header/footer handling (advanced):
+
+- `--header {inline,discard,extract,comment}` and `--footer {inline,discard,extract,comment}`
+  - `comment` (default): extract and add them back as HTML comments in the markdown
+  - `inline`: keep headers/footers in the main markdown
+  - `discard`: extract headers/footers but drop them
+  - `extract`: extract and write `<stem>_headers_footers.md`
 
 Supported document formats:
 

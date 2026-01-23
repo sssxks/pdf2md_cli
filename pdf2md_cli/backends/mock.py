@@ -34,7 +34,6 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
         table_format: TableFormat | None,
         extract_header: bool,
         extract_footer: bool,
-        include_image_base64: bool,
         progress: Progress,
     ) -> OcrResult:
         # Parameters exist to match the real runner; most are unused but useful for UX parity.
@@ -48,7 +47,6 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
             table_format,
             extract_header,
             extract_footer,
-            include_image_base64,
         )
 
         remaining_failures = mock.fail_first
@@ -68,7 +66,18 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
             img_global = 1
             for p in range(max(1, mock.pages)):
                 images: list[OcrImage] = []
-                md_lines = [f"# Mock OCR", f"", f"- page: {p + 1}", f"- backend: mock", ""]
+                page_no = p + 1
+                header_text = f"Mock Header (page {page_no})"
+                footer_text = f"Mock Footer (page {page_no})"
+
+                md_lines = [f"# Mock OCR", f"", f"- page: {page_no}", f"- backend: mock", ""]
+                page_header: str | None = None
+                page_footer: str | None = None
+
+                if extract_header:
+                    page_header = header_text
+                else:
+                    md_lines.extend([header_text, ""])
 
                 for _i in range(max(0, mock.images_per_page)):
                     img_id = f"mock_image_{img_global:03d}"
@@ -96,7 +105,20 @@ def make_mock_runner(*, mock: MockConfig, backoff: BackoffConfig) -> OcrRunner:
                         content = "| A | B |\n| - | - |\n| 1 | 2 |"
                     tables.append(OcrTable(id=tbl_id, content=content, format=table_format.value))
 
-                pages.append(OcrPage(markdown="\n".join(md_lines).strip(), images=images, tables=tables))
+                if extract_footer:
+                    page_footer = footer_text
+                else:
+                    md_lines.extend(["", footer_text])
+
+                pages.append(
+                    OcrPage(
+                        markdown="\n".join(md_lines).strip(),
+                        images=images,
+                        tables=tables,
+                        header=page_header,
+                        footer=page_footer,
+                    )
+                )
 
             return OcrResult(pages=pages)
 

@@ -5,15 +5,21 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Callable, TypeVar
+from typing import Callable, Protocol, TypeVar
 
 from pdf2md_cli.types import NO_PROGRESS, Progress
 
 T = TypeVar("T")
 
 
+class _Rng(Protocol):
+    def uniform(self, a: float, b: float) -> float: ...
+
+
 @dataclass(frozen=True, slots=True)
 class BackoffConfig:
+    """Configuration for retry attempts and exponential backoff."""
+
     max_retries: int = 5
     initial_delay_s: float = 0.5
     max_delay_s: float = 20.0
@@ -132,7 +138,7 @@ def with_backoff(
     cfg: BackoffConfig,
     progress: Progress = NO_PROGRESS,
     sleep_fn: Callable[[float], None] = time.sleep,
-    rng: random.Random = random,
+    rng: _Rng = random,
 ) -> T:
     """
     Retry wrapper with exponential backoff + jitter.

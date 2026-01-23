@@ -5,8 +5,10 @@ import concurrent.futures
 import os
 import re
 import sys
+from collections.abc import Callable
 from difflib import get_close_matches
 from pathlib import Path
+from typing import NoReturn
 
 from pdf2md_cli.auth import error, load_api_key
 from pdf2md_cli.backends.mistral import make_mistral_runner
@@ -14,7 +16,7 @@ from pdf2md_cli.feature_flags import mock_backend_enabled
 from pdf2md_cli.inputs import expand_inputs, validate_input_paths
 from pdf2md_cli.pipeline import convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
-from pdf2md_cli.types import Progress, TableFormat
+from pdf2md_cli.types import HeaderFooterMode, Progress, TableFormat
 from pdf2md_cli.ui import Spinner
 
 DEFAULT_OCR_MODEL = "mistral-ocr-latest"
@@ -64,7 +66,7 @@ def _reorder_help_sections(text: str) -> str:
         stripped = line.strip()
         return bool(stripped) and (not line.startswith((" ", "\t"))) and stripped.endswith(":")
 
-    def _find_line(pred) -> int | None:
+    def _find_line(pred: Callable[[str], bool]) -> int | None:
         for i, ln in enumerate(lines):
             if pred(ln):
                 return i
@@ -128,7 +130,7 @@ def _colorize_help(text: str) -> str:
 
 
 class _FriendlyArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:  # noqa: A003
+    def error(self, message: str) -> NoReturn:  # noqa: A003
         error(message)
 
         unknown: list[str] = []
@@ -302,19 +304,28 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
             help="Do not insert per-page markers like <!-- page: N --> when concatenating OCR pages",
         )
         advanced_group.add_argument(
-            "--extract-header",
-            action="store_true",
-            help="(mistral) Extract headers separately (writes <stem>_headers_footers.md when present)",
+            "--header",
+            choices=[m.value for m in HeaderFooterMode],
+            default=HeaderFooterMode.COMMENT.value,
+            help=(
+                "(mistral) Header handling mode (default: comment).\n"
+                "  - inline: keep headers in the main markdown\n"
+                "  - discard: drop headers\n"
+                "  - extract: extract headers into <stem>_headers_footers.md\n"
+                "  - comment: keep headers them back as HTML comments"
+            ),
         )
         advanced_group.add_argument(
-            "--extract-footer",
-            action="store_true",
-            help="(mistral) Extract footers separately (writes <stem>_headers_footers.md when present)",
-        )
-        advanced_group.add_argument(
-            "--no-image-base64",
-            action="store_true",
-            help="(mistral) Do not request image base64 payloads from OCR (image placeholders may be blank)",
+            "--footer",
+            choices=[m.value for m in HeaderFooterMode],
+            default=HeaderFooterMode.COMMENT.value,
+            help=(
+                "(mistral) Footer handling mode (default: comment).\n"
+                "  - inline: keep footers in the main markdown\n"
+                "  - discard: drop footers\n"
+                "  - extract: extract footers into <stem>_headers_footers.md\n"
+                "  - comment: keep footers them back as HTML comments"
+            ),
         )
 
         if enable_mock:
@@ -350,9 +361,18 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
         parser.add_argument("--backoff-jitter", type=float, default=0.2, help=argparse.SUPPRESS)
         parser.add_argument("--no-front-matter", action="store_true", help=argparse.SUPPRESS)
         parser.add_argument("--no-page-markers", action="store_true", help=argparse.SUPPRESS)
-        parser.add_argument("--extract-header", action="store_true", help=argparse.SUPPRESS)
-        parser.add_argument("--extract-footer", action="store_true", help=argparse.SUPPRESS)
-        parser.add_argument("--no-image-base64", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--header",
+            choices=[m.value for m in HeaderFooterMode],
+            default=HeaderFooterMode.COMMENT.value,
+            help=argparse.SUPPRESS,
+        )
+        parser.add_argument(
+            "--footer",
+            choices=[m.value for m in HeaderFooterMode],
+            default=HeaderFooterMode.COMMENT.value,
+            help=argparse.SUPPRESS,
+        )
 
         if enable_mock:
             parser.add_argument("--mock-pages", type=int, default=1, help=argparse.SUPPRESS)
@@ -365,11 +385,6 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return _build_parser(advanced=False).parse_args(argv)
-
-
-def _parse_args_advanced(argv: list[str] | None = None) -> argparse.Namespace:
-    return _build_parser(advanced=True).parse_args(argv)
-
 
 def _print_tables_help() -> None:
     print(_TABLE_HELP)
@@ -436,6 +451,9 @@ def main(argv: list[str] | None = None) -> None:
         error(str(e))
         raise SystemExit(2) from e
 
+    header_mode = HeaderFooterMode(getattr(args, "header", HeaderFooterMode.COMMENT.value))
+    footer_mode = HeaderFooterMode(getattr(args, "footer", HeaderFooterMode.COMMENT.value))
+
     try:
         input_files = expand_inputs(args.files)
         validate_input_paths(input_files)
@@ -468,18 +486,6 @@ def main(argv: list[str] | None = None) -> None:
 
     parsed_table_format = TableFormat(args.table_format)
 
-    table_format: TableFormat | None
-    inline_tables: bool
-    if parsed_table_format == TableFormat.HTML:
-        table_format = TableFormat.HTML
-        inline_tables = not bool(args.extract_table)
-    else:
-        # markdown mode:
-        # - default (no --extract-table): keep tables inline (API default => do not send table_format)
-        # - with --extract-table: request extracted markdown tables separately
-        table_format = TableFormat.MARKDOWN if bool(args.extract_table) else None
-        inline_tables = False
-
     # Single-file path: keep spinner UX.
     if len(input_files) == 1:
         input_path = input_files[0]
@@ -494,13 +500,12 @@ def main(argv: list[str] | None = None) -> None:
                 runner=runner,
                 model=args.model,
                 delete_remote_file=not args.keep_remote_file,
-                table_format=table_format,
-                extract_header=bool(args.extract_header),
-                extract_footer=bool(args.extract_footer),
-                include_image_base64=not bool(args.no_image_base64),
+                table_format=parsed_table_format,
+                extract_table=bool(args.extract_table),
+                header_mode=header_mode,
+                footer_mode=footer_mode,
                 add_front_matter=not bool(args.no_front_matter),
                 add_page_markers=not bool(args.no_page_markers),
-                inline_tables=inline_tables,
                 progress=Progress(spinner.update),
             )
             spinner.stop(clear=True)
@@ -537,13 +542,12 @@ def main(argv: list[str] | None = None) -> None:
                 runner=runner,
                 model=args.model,
                 delete_remote_file=not args.keep_remote_file,
-                table_format=table_format,
-                extract_header=bool(args.extract_header),
-                extract_footer=bool(args.extract_footer),
-                include_image_base64=not bool(args.no_image_base64),
+                table_format=parsed_table_format,
+                extract_table=bool(args.extract_table),
+                header_mode=header_mode,
+                footer_mode=footer_mode,
                 add_front_matter=not bool(args.no_front_matter),
                 add_page_markers=not bool(args.no_page_markers),
-                inline_tables=inline_tables,
                 progress=Progress(_progress),
             )
             return res.markdown_path, None
