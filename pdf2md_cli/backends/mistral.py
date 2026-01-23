@@ -101,16 +101,16 @@ def make_mistral_runner(*, api_key: str, backoff: BackoffConfig) -> OcrRunner:
                     cfg=backoff,
                     progress=progress,
                 )
-            elif input_kind == InputKind.PDF:
+            elif input_kind == InputKind.DOCUMENT:
                 try:
-                    progress.emit("Uploading PDF...")
+                    progress.emit("Uploading document...")
 
                     uploaded = with_backoff(
                         lambda: client.files.upload(
                             file={"file_name": file_name, "content": content},
                             purpose="ocr",
                         ),
-                        what="Upload PDF",
+                        what="Upload document",
                         cfg=backoff,
                         progress=progress,
                     )

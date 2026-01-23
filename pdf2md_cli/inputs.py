@@ -55,10 +55,3 @@ def validate_input_paths(input_files: list[Path]) -> None:
             )
         )
 
-
-def validate_pdf_paths(pdf_files: list[Path]) -> None:
-    supported = VALID_DOCUMENT_EXTENSIONS
-    unsupported = [p for p in pdf_files if p.suffix.lower() not in supported]
-    if unsupported:
-        raise ValueError("\n".join(f"Unsupported file type (expected .pdf): {p}" for p in unsupported))
-    validate_input_paths(pdf_files)

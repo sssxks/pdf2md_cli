@@ -3,15 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from pdf2md_cli.backends.mistral import make_mistral_runner
-from pdf2md_cli.pipeline import convert_pdf_to_markdown
+from pdf2md_cli.pipeline import convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
 from pdf2md_cli.types import NO_PROGRESS, Progress
 
 DEFAULT_OCR_MODEL = "mistral-ocr-latest"
 
-
-def convert_pdf_to_markdown_mistral(
-    pdf_file: Path,
+def convert_file_to_markdown_mistral(
+    input_file: Path,
     outdir: Path,
     api_key: str,
     *,
@@ -32,8 +31,8 @@ def convert_pdf_to_markdown_mistral(
         jitter=backoff_jitter,
     )
     runner = make_mistral_runner(api_key=api_key, backoff=backoff)
-    res = convert_pdf_to_markdown(
-        pdf_file=pdf_file,
+    res = convert_file_to_markdown(
+        input_file=input_file,
         outdir=outdir,
         runner=runner,
         model=model,

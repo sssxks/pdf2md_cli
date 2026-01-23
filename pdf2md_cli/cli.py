@@ -169,11 +169,13 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
     parser = _FriendlyArgumentParser(
         prog="2md",
         formatter_class=argparse.RawTextHelpFormatter,
-        description="Convert PDFs/images to Markdown using Mistral OCR.",
+        description="Convert documents/images to Markdown using Mistral OCR.",
         epilog=(
             "Examples:\n"
             "  2md file.pdf\n"
             "  2md docs/*.pdf --workers 4\n"
+            "  2md file.docx\n"
+            "  2md slides.pptx\n"
             "  2md file.pdf -o out\n"
             "  2md file.pdf --table-format markdown\n"
             "  2md file.pdf --extract-table --table-format html\n"
@@ -189,7 +191,10 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
     io_group.add_argument(
         "files",
         nargs="+",
-        help="One or more files (PDF or supported image); supports glob patterns (e.g. docs/*.*)",
+        help=(
+            "One or more files (supported document or image); supports glob patterns (e.g. docs/*.*).\n"
+            "Documents: .pdf .docx .pptx .txt .epub .xml .rtf .odt .bib .fb2 .ipynb .tex .opml .1 .man"
+        ),
     )
     io_group.add_argument(
         "-o",
@@ -225,7 +230,7 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
     backend_group.add_argument(
         "--keep-remote-file",
         action="store_true",
-        help="(mistral) Do not delete uploaded PDFs from Mistral after OCR completes",
+        help="(mistral) Do not delete uploaded documents from Mistral after OCR completes",
     )
 
     perf_group = parser.add_argument_group("Performance")

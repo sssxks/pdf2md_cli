@@ -50,7 +50,7 @@ class TableFormat(StrEnum):
 
 
 class InputKind(StrEnum):
-    PDF = "pdf"
+    DOCUMENT = "document"
     IMAGE = "image"
 
 

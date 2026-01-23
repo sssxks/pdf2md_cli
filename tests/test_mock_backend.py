@@ -10,12 +10,74 @@ from pathlib import Path
 
 from pdf2md_cli.cli import main as cli_main
 from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
-from pdf2md_cli.pipeline import convert_file_to_markdown, convert_pdf_to_markdown
+from pdf2md_cli.pipeline import convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
 from pdf2md_cli.types import NO_PROGRESS, InputKind, OcrPage, OcrResult, OcrTable, TableFormat
 
 
 class TestMockBackend(unittest.TestCase):
+    def test_docx_and_pptx_inputs_are_supported(self) -> None:
+        def runner(
+            *,
+            file_name: str,
+            content: bytes,
+            model: str,
+            delete_remote_file: bool,
+            input_kind: InputKind,
+            mime_type: str | None,
+            table_format: TableFormat | None,
+            extract_header: bool,
+            extract_footer: bool,
+            include_image_base64: bool,
+            progress: object,
+        ) -> OcrResult:
+            _ = (
+                file_name,
+                content,
+                model,
+                delete_remote_file,
+                mime_type,
+                table_format,
+                extract_header,
+                extract_footer,
+                include_image_base64,
+                progress,
+            )
+            self.assertEqual(input_kind, InputKind.DOCUMENT)
+            return OcrResult(pages=[OcrPage(markdown="# ok", images=[])])
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            outdir = tmp / "out"
+
+            for ext in [
+                ".docx",
+                ".pptx",
+                ".txt",
+                ".epub",
+                ".xml",
+                ".rtf",
+                ".odt",
+                ".bib",
+                ".fb2",
+                ".ipynb",
+                ".tex",
+                ".opml",
+                ".1",
+                ".man",
+            ]:
+                p = tmp / f"sample{ext}"
+                p.write_bytes(f"mock {ext}".encode("utf-8"))
+                res = convert_file_to_markdown(
+                    input_file=p,
+                    outdir=outdir / ext.lstrip("."),
+                    runner=runner,
+                    model="mock-model",
+                    delete_remote_file=True,
+                    progress=NO_PROGRESS,
+                )
+                self.assertTrue(res.markdown_path.exists())
+
     def test_cli_default_inlines_html_tables(self) -> None:
         os.environ["PDF2MD_ENABLE_MOCK"] = "1"
 
@@ -309,33 +371,6 @@ class TestMockBackend(unittest.TestCase):
             )
 
             self.assertTrue(res.markdown_path.exists())
-
-    def test_convert_pdf_to_markdown_rejects_non_pdf(self) -> None:
-        runner = make_mock_runner(
-            mock=MockConfig(pages=1, images_per_page=0, delay_ms=0, fail_first=0),
-            backoff=BackoffConfig(max_retries=0, initial_delay_s=0.0, max_delay_s=0.01, jitter=0.0),
-        )
-
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            img_path = tmp / "not_a_pdf.png"
-            img_path.write_bytes(
-                base64.b64decode(
-                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQAB"
-                    "pfZFQAAAAABJRU5ErkJggg=="
-                )
-            )
-
-            with self.assertRaises(ValueError):
-                convert_pdf_to_markdown(
-                    pdf_file=img_path,
-                    outdir=tmp / "out",
-                    runner=runner,
-                    model="mock-model",
-                    delete_remote_file=True,
-                    progress=NO_PROGRESS,
-                )
-
 
 if __name__ == "__main__":
     unittest.main()

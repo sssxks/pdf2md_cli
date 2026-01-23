@@ -1,6 +1,6 @@
 ## 2md
 
-Convert one or more PDFs/images to Markdown using **Mistral OCR**.
+Convert one or more documents/images to Markdown using **Mistral OCR**.
 
 ### Install (uv)
 
@@ -21,6 +21,8 @@ Run:
 ```bash
 2md path\\to\\file.pdf
 2md path\\to\\image.png
+2md path\\to\\file.docx
+2md path\\to\\slides.pptx
 2md docs\\*.pdf --workers 4
 2md docs\\*.png --workers 4
 2md path\\to\\file.pdf -o out
@@ -51,6 +53,23 @@ Table handling behavior:
 | `--extract-table --table-format html` | `html` | Links to `tbl-*.html` | writes `tbl-*.html` |
 | `--extract-table --table-format markdown` | `markdown` | Links to `tbl-*.md` | writes `tbl-*.md` |
 
+Supported document formats:
+
+- PDF (`.pdf`)
+- Word (`.docx`)
+- PowerPoint (`.pptx`)
+- Text (`.txt`)
+- EPUB (`.epub`)
+- XML / DocBook / JATS XML (`.xml`)
+- RTF (`.rtf`)
+- OpenDocument Text (`.odt`)
+- BibTeX / BibLaTeX (`.bib`)
+- FictionBook (`.fb2`)
+- Jupyter Notebooks (`.ipynb`)
+- LaTeX (`.tex`)
+- OPML (`.opml`)
+- Troff (`.1`, `.man`)
+
 Supported image formats:
 
 - JPEG (`.jpg`, `.jpeg`)
@@ -70,7 +89,7 @@ Retries and backoff:
 
 ### Remote file cleanup (after OCR)
 
-For PDF inputs, this CLI uploads your PDF to Mistral's Files API with `purpose="ocr"` and **deletes the uploaded file after the OCR call completes** (best-effort).
+For document inputs (e.g. `.pdf`, `.docx`, `.pptx`), this CLI uploads the file to Mistral's Files API with `purpose="ocr"` and **deletes the uploaded file after the OCR call completes** (best-effort).
 
 For image inputs, the CLI sends a `data:` URL to the OCR API (no file upload), so there is no remote file to delete.
 

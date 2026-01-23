@@ -40,7 +40,23 @@ class ConvertResult:
     image_id_to_filename: dict[str, str]
 
 
-VALID_DOCUMENT_EXTENSIONS = {".pdf"}
+VALID_DOCUMENT_EXTENSIONS = {
+    ".pdf",
+    ".docx",
+    ".pptx",
+    ".txt",
+    ".epub",
+    ".xml",
+    ".rtf",
+    ".odt",
+    ".bib",
+    ".fb2",
+    ".ipynb",
+    ".tex",
+    ".opml",
+    ".1",
+    ".man",
+}
 VALID_IMAGE_EXTENSIONS = {
     ".jpg",
     ".jpeg",
@@ -347,47 +363,17 @@ def rewrite_markdown(
     return md.render(doc).strip()
 
 
-def convert_pdf_to_markdown(
-    *,
-    pdf_file: Path,
-    outdir: Path,
-    runner: OcrRunner,
-    model: str,
-    delete_remote_file: bool,
-    table_format: TableFormat | None = None,
-    extract_header: bool = False,
-    extract_footer: bool = False,
-    include_image_base64: bool = True,
-    progress: Progress = NO_PROGRESS,
-) -> ConvertResult:
-    input_kind, _mime_type = _classify_input(pdf_file)
-    if input_kind != InputKind.PDF:
-        raise ValueError(f"pdf_file must be a PDF (.pdf). Got: {pdf_file.name}")
-    return convert_file_to_markdown(
-        input_file=pdf_file,
-        outdir=outdir,
-        runner=runner,
-        model=model,
-        delete_remote_file=delete_remote_file,
-        table_format=table_format,
-        extract_header=extract_header,
-        extract_footer=extract_footer,
-        include_image_base64=include_image_base64,
-        progress=progress,
-    )
-
-
 def _classify_input(input_file: Path) -> tuple[InputKind, str | None]:
     ext = input_file.suffix.lower()
     if ext in VALID_DOCUMENT_EXTENSIONS:
-        return InputKind.PDF, None
+        return InputKind.DOCUMENT, None
     if ext in VALID_IMAGE_EXTENSIONS:
         mime = _EXT_TO_MIME.get(ext)
         if not mime:
             raise ValueError(f"Unsupported image type: {ext}")
         return InputKind.IMAGE, mime
     raise ValueError(
-        f"Unsupported file type: {ext}. Supported: PDFs ({', '.join(sorted(VALID_DOCUMENT_EXTENSIONS))}) "
+        f"Unsupported file type: {ext}. Supported: documents ({', '.join(sorted(VALID_DOCUMENT_EXTENSIONS))}) "
         f"and images ({', '.join(sorted(VALID_IMAGE_EXTENSIONS))})."
     )
 
