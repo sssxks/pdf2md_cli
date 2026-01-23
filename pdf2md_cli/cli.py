@@ -7,17 +7,18 @@ from pathlib import Path
 
 from pdf2md_cli.auth import error, load_api_key
 from pdf2md_cli.backends.mistral import make_mistral_runner
-from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
+from pdf2md_cli.feature_flags import mock_backend_enabled
 from pdf2md_cli.inputs import expand_inputs, validate_input_paths
 from pdf2md_cli.pipeline import convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
 from pdf2md_cli.types import Progress
 from pdf2md_cli.ui import Spinner
 
-DEFAULT_OCR_MODEL = "mistral-ocr-2505"
+DEFAULT_OCR_MODEL = "mistral-ocr-latest"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    enable_mock = mock_backend_enabled()
     parser = argparse.ArgumentParser(
         description=(
             "Convert one or more PDFs/images to Markdown using Mistral OCR. Images are saved alongside "
@@ -42,7 +43,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=["mistral", "mock"],
+        choices=(["mistral", "mock"] if enable_mock else ["mistral"]),
         default="mistral",
         help="OCR backend to use (default: mistral)",
     )
@@ -98,32 +99,69 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="(mistral backend) Do not delete the uploaded file from Mistral after OCR completes",
     )
+    parser.add_argument(
+        "--table-format",
+        choices=["null", "markdown", "html"],
+        default="html",
+        help="(mistral backend) Table extraction format (default: html; use 'null' to disable separate table extraction)",
+    )
+    parser.add_argument(
+        "--no-inline-tables",
+        action="store_true",
+        help="Do not inline extracted HTML tables into the markdown (keep links like [tbl-3.html](tbl-3.html))",
+    )
+    parser.add_argument(
+        "--no-front-matter",
+        action="store_true",
+        help="Do not add YAML front matter metadata to the top of the markdown output",
+    )
+    parser.add_argument(
+        "--no-page-markers",
+        action="store_true",
+        help="Do not insert per-page markers like <!-- page: N --> when concatenating OCR pages",
+    )
+    parser.add_argument(
+        "--extract-header",
+        action="store_true",
+        help="(mistral backend) Extract headers separately (writes <stem>_headers_footers.md when present)",
+    )
+    parser.add_argument(
+        "--extract-footer",
+        action="store_true",
+        help="(mistral backend) Extract footers separately (writes <stem>_headers_footers.md when present)",
+    )
+    parser.add_argument(
+        "--no-image-base64",
+        action="store_true",
+        help="(mistral backend) Do not request image base64 payloads from OCR (image placeholders may be blank)",
+    )
 
-    # Mock-only knobs for UX testing.
-    parser.add_argument(
-        "--mock-pages",
-        type=int,
-        default=1,
-        help="(mock backend) Number of pages to generate (default: 1)",
-    )
-    parser.add_argument(
-        "--mock-images",
-        type=int,
-        default=1,
-        help="(mock backend) Images per page to generate (default: 1)",
-    )
-    parser.add_argument(
-        "--mock-delay-ms",
-        type=int,
-        default=0,
-        help="(mock backend) Artificial delay per file in milliseconds (default: 0)",
-    )
-    parser.add_argument(
-        "--mock-fail-first",
-        type=int,
-        default=0,
-        help="(mock backend) Fail N times before succeeding to exercise retries (default: 0)",
-    )
+    if enable_mock:
+        # Mock-only knobs for UX testing.
+        parser.add_argument(
+            "--mock-pages",
+            type=int,
+            default=1,
+            help="(mock backend) Number of pages to generate (default: 1)",
+        )
+        parser.add_argument(
+            "--mock-images",
+            type=int,
+            default=1,
+            help="(mock backend) Images per page to generate (default: 1)",
+        )
+        parser.add_argument(
+            "--mock-delay-ms",
+            type=int,
+            default=0,
+            help="(mock backend) Artificial delay per file in milliseconds (default: 0)",
+        )
+        parser.add_argument(
+            "--mock-fail-first",
+            type=int,
+            default=0,
+            help="(mock backend) Fail N times before succeeding to exercise retries (default: 0)",
+        )
 
     return parser.parse_args(argv)
 
@@ -142,13 +180,15 @@ def _validate_args(args: argparse.Namespace) -> None:
     if not (0.0 <= args.backoff_jitter <= 1.0):
         raise ValueError("--backoff-jitter must be between 0 and 1")
     if args.backend == "mock":
-        if args.mock_pages <= 0:
+        if not mock_backend_enabled():
+            raise ValueError('mock backend is disabled (set env var PDF2MD_ENABLE_MOCK=1 to enable)')
+        if getattr(args, "mock_pages", 1) <= 0:
             raise ValueError("--mock-pages must be > 0")
-        if args.mock_images < 0:
+        if getattr(args, "mock_images", 1) < 0:
             raise ValueError("--mock-images must be >= 0")
-        if args.mock_delay_ms < 0:
+        if getattr(args, "mock_delay_ms", 0) < 0:
             raise ValueError("--mock-delay-ms must be >= 0")
-        if args.mock_fail_first < 0:
+        if getattr(args, "mock_fail_first", 0) < 0:
             raise ValueError("--mock-fail-first must be >= 0")
 
 
@@ -180,11 +220,13 @@ def main(argv: list[str] | None = None) -> None:
         api_key = load_api_key(args.api_key)
         runner = make_mistral_runner(api_key=api_key, backoff=backoff)
     else:
+        from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
+
         mock_cfg = MockConfig(
-            pages=args.mock_pages,
-            images_per_page=args.mock_images,
-            delay_ms=args.mock_delay_ms,
-            fail_first=args.mock_fail_first,
+            pages=getattr(args, "mock_pages", 1),
+            images_per_page=getattr(args, "mock_images", 1),
+            delay_ms=getattr(args, "mock_delay_ms", 0),
+            fail_first=getattr(args, "mock_fail_first", 0),
         )
         runner = make_mock_runner(mock=mock_cfg, backoff=backoff)
 
@@ -202,6 +244,13 @@ def main(argv: list[str] | None = None) -> None:
                 runner=runner,
                 model=args.model,
                 delete_remote_file=not args.keep_remote_file,
+                table_format=None if args.table_format == "null" else args.table_format,
+                extract_header=bool(args.extract_header),
+                extract_footer=bool(args.extract_footer),
+                include_image_base64=not bool(args.no_image_base64),
+                add_front_matter=not bool(args.no_front_matter),
+                add_page_markers=not bool(args.no_page_markers),
+                inline_tables=not bool(args.no_inline_tables),
                 progress=Progress(spinner.update),
             )
             spinner.stop(clear=True)
@@ -238,6 +287,13 @@ def main(argv: list[str] | None = None) -> None:
                 runner=runner,
                 model=args.model,
                 delete_remote_file=not args.keep_remote_file,
+                table_format=None if args.table_format == "null" else args.table_format,
+                extract_header=bool(args.extract_header),
+                extract_footer=bool(args.extract_footer),
+                include_image_base64=not bool(args.no_image_base64),
+                add_front_matter=not bool(args.no_front_matter),
+                add_page_markers=not bool(args.no_page_markers),
+                inline_tables=not bool(args.no_inline_tables),
                 progress=Progress(_progress),
             )
             return res.markdown_path, None

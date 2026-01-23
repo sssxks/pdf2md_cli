@@ -7,7 +7,7 @@ from pdf2md_cli.pipeline import convert_pdf_to_markdown
 from pdf2md_cli.retry import BackoffConfig
 from pdf2md_cli.types import NO_PROGRESS, Progress
 
-DEFAULT_OCR_MODEL = "mistral-ocr-2505"
+DEFAULT_OCR_MODEL = "mistral-ocr-latest"
 
 
 def convert_pdf_to_markdown_mistral(

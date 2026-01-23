@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Callable
 
 
@@ -49,9 +50,19 @@ class OcrImage:
 
 
 @dataclass(frozen=True, slots=True)
+class OcrTable:
+    id: str
+    content: str
+    format: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OcrPage:
     markdown: str
     images: list[OcrImage]
+    tables: list[OcrTable] = field(default_factory=list)
+    header: str | None = None
+    footer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

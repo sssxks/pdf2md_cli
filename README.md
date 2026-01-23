@@ -24,10 +24,12 @@ Run:
 2md docs\\*.pdf --workers 4
 2md docs\\*.png --workers 4
 2md path\\to\\file.pdf -o out
-2md path\\to\\file.pdf --model mistral-ocr-2505
+2md path\\to\\file.pdf --model mistral-ocr-latest
 2md path\\to\\file.pdf --keep-remote-file
+2md path\\to\\file.pdf --table-format null
+2md path\\to\\file.pdf --no-inline-tables
+2md path\\to\\file.pdf --no-front-matter --no-page-markers
 2md docs\\*.pdf --workers 4 --retries 8 --backoff-max-ms 60000
-2md path\\to\\file.pdf --backend mock --mock-pages 2 --mock-images 3 --mock-delay-ms 250
 ```
 
 Supported image formats:
@@ -45,7 +47,7 @@ Retries and backoff:
 
 - By default the CLI retries transient API failures (e.g. HTTP 429/5xx) with exponential backoff + jitter.
 - Tweak with `--retries`, `--backoff-initial-ms`, `--backoff-max-ms`, `--backoff-multiplier`, `--backoff-jitter`.
-- Use `--backend mock` to experiment with the CLI UX without calling the Mistral API.
+  (For contributors: set `PDF2MD_ENABLE_MOCK=1` to enable the hidden mock backend for UX testing.)
 
 ### Remote file cleanup (after OCR)
 
