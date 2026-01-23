@@ -41,7 +41,3 @@ def convert_pdf_to_markdown_mistral(
         progress=progress,
     )
     return res.markdown_path, res.image_id_to_filename
-
-
-# Backwards-compatible alias for older code importing pdf2md_cli.cli.convert_pdf_to_markdown.
-convert_pdf_to_markdown = convert_pdf_to_markdown_mistral
