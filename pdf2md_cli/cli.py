@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import os
 import re
 import sys
@@ -10,11 +9,10 @@ from difflib import get_close_matches
 from pathlib import Path
 from typing import NoReturn
 
+from pdf2md_cli.api import ConvertOptions, convert_file, convert_files
 from pdf2md_cli.auth import error, load_api_key
-from pdf2md_cli.backends.mistral import make_mistral_runner
 from pdf2md_cli.feature_flags import mock_backend_enabled
 from pdf2md_cli.inputs import expand_inputs, validate_input_paths
-from pdf2md_cli.pipeline import convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
 from pdf2md_cli.types import HeaderFooterMode, Progress, TableFormat
 from pdf2md_cli.ui import Spinner
@@ -469,22 +467,21 @@ def main(argv: list[str] | None = None) -> None:
         jitter=args.backoff_jitter,
     )
 
-    runner = None
+    api_key: str | None = None
     if args.backend == "mistral":
         api_key = load_api_key(args.api_key)
-        runner = make_mistral_runner(api_key=api_key, backoff=backoff)
-    else:
-        from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
-
-        mock_cfg = MockConfig(
-            pages=getattr(args, "mock_pages", 1),
-            images_per_page=getattr(args, "mock_images", 1),
-            delay_ms=getattr(args, "mock_delay_ms", 0),
-            fail_first=getattr(args, "mock_fail_first", 0),
-        )
-        runner = make_mock_runner(mock=mock_cfg, backoff=backoff)
 
     parsed_table_format = TableFormat(args.table_format)
+
+    options = ConvertOptions(
+        model=args.model,
+        table_format=parsed_table_format,
+        extract_table=bool(args.extract_table),
+        header=header_mode,
+        footer=footer_mode,
+        add_front_matter=not bool(args.no_front_matter),
+        add_page_markers=not bool(args.no_page_markers),
+    )
 
     # Single-file path: keep spinner UX.
     if len(input_files) == 1:
@@ -494,18 +491,14 @@ def main(argv: list[str] | None = None) -> None:
         spinner = Spinner(enabled=True)
         try:
             spinner.start("Starting...")
-            result = convert_file_to_markdown(
-                input_file=input_path,
+            result = convert_file(
+                input_path,
                 outdir=outdir,
-                runner=runner,
-                model=args.model,
-                delete_remote_file=not args.keep_remote_file,
-                table_format=parsed_table_format,
-                extract_table=bool(args.extract_table),
-                header_mode=header_mode,
-                footer_mode=footer_mode,
-                add_front_matter=not bool(args.no_front_matter),
-                add_page_markers=not bool(args.no_page_markers),
+                backend=args.backend,
+                api_key=api_key,
+                keep_remote_file=bool(args.keep_remote_file),
+                backoff=backoff,
+                options=options,
                 progress=Progress(spinner.update),
             )
             spinner.stop(clear=True)
@@ -519,72 +512,42 @@ def main(argv: list[str] | None = None) -> None:
 
     # Batch path: concurrent processing.
     base_outdir = args.outdir
-    max_workers = args.workers or min(16, len(input_files))
     total_files = len(input_files)
 
-    def _outdir_for(p: Path) -> Path:
-        if base_outdir:
-            return base_outdir / f"{p.stem}_ocr"
-        return p.parent / f"{p.stem}_ocr"
-
     spinner = Spinner(enabled=True)
+    max_workers = args.workers or min(16, total_files)
 
-    def _task(p: Path, idx_1based: int) -> tuple[Path, str | None]:
-        try:
-            outdir = _outdir_for(p)
-
-            def _progress(msg: str) -> None:
-                spinner.update(f"[{idx_1based}/{total_files}] {p.name}: {msg}")
-
-            res = convert_file_to_markdown(
-                input_file=p,
-                outdir=outdir,
-                runner=runner,
-                model=args.model,
-                delete_remote_file=not args.keep_remote_file,
-                table_format=parsed_table_format,
-                extract_table=bool(args.extract_table),
-                header_mode=header_mode,
-                footer_mode=footer_mode,
-                add_front_matter=not bool(args.no_front_matter),
-                add_page_markers=not bool(args.no_page_markers),
-                progress=Progress(_progress),
-            )
-            return res.markdown_path, None
-        except Exception as e:  # noqa: BLE001
-            return p, str(e)
-
-    results: list[tuple[Path, str | None]] = [(p, "not started") for p in input_files]
+    def _progress(msg: str) -> None:
+        spinner.update(msg)
 
     spinner.start(f"Starting batch ({total_files} files, {max_workers} workers)...")
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            future_to_idx = {pool.submit(_task, p, idx + 1): idx for idx, p in enumerate(input_files)}
-            completed = 0
-            for future in concurrent.futures.as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    results[idx] = future.result()
-                except Exception as e:  # pragma: no cover
-                    results[idx] = (input_files[idx], str(e))
-                completed += 1
-                spinner.update(f"Completed {completed}/{total_files}: {input_files[idx].name}")
-    finally:
+        batch = convert_files(
+            input_files,
+            outdir=base_outdir,
+            backend=args.backend,
+            api_key=api_key,
+            keep_remote_file=bool(args.keep_remote_file),
+            backoff=backoff,
+            workers=max_workers,
+            options=options,
+            progress=Progress(_progress),
+        )
+    except Exception as e:  # noqa: BLE001
         spinner.stop(clear=True)
+        error(str(e))
+        raise SystemExit(1) from e
+    spinner.stop(clear=True)
 
-    failed = False
-    ok = 0
-    for (md_path, maybe_err), original_input in zip(results, input_files):
-        if maybe_err is None:
-            print(str(md_path))
-            ok += 1
-        else:
-            failed = True
-            error(f"Failed to process {original_input}: {maybe_err}")
+    for res in batch.succeeded:
+        print(str(res.markdown_path))
+    for fail in batch.failed:
+        error(f"Failed to process {fail.input_file}: {fail.error}")
 
-    fail = total_files - ok
+    ok = len(batch.succeeded)
+    fail = len(batch.failed)
     print(f"Done: {ok}/{total_files} succeeded, {fail} failed.", file=sys.stderr)
-    if failed:
+    if fail:
         raise SystemExit(1)
 
 
