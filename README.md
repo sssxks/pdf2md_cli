@@ -2,6 +2,12 @@
 
 Convert one or more documents/images to Markdown using **Mistral OCR**.
 
+### Install (uv)
+
+```bash
+uv tool install https://github.com/sssxks/pdf2md_cli.git --reinstall
+```
+
 ### Use as a library
 
 ```python
@@ -14,12 +20,6 @@ print(res.markdown_path)
 # batch (supports globs)
 batch = convert_files(["docs/*.pdf", "docs/*.png"], api_key="...", outdir="out", workers=4)
 print(len(batch.succeeded), len(batch.failed))
-```
-
-### Install (uv)
-
-```bash
-uv tool install -e . --reinstall
 ```
 
 ### Usage
@@ -109,13 +109,13 @@ Retries and backoff:
 - Tweak with `--retries`, `--backoff-initial-ms`, `--backoff-max-ms`, `--backoff-multiplier`, `--backoff-jitter`.
   (For contributors: set `PDF2MD_ENABLE_MOCK=1` to enable the hidden mock backend for UX testing.)
 
-### Remote file cleanup (after OCR)
+### Tips: Remote file cleanup
 
 For document inputs (e.g. `.pdf`, `.docx`, `.pptx`), this CLI uploads the file to Mistral's Files API with `purpose="ocr"` and **deletes the uploaded file after the OCR call completes** (best-effort).
 
 For image inputs, the CLI sends a `data:` URL to the OCR API (no file upload), so there is no remote file to delete.
 
-If you are calling the API yourself and want to delete an uploaded file explicitly, you can do:
+If CLI did best-effort cleanup and it still fails. You can do:
 
 ```python
 from mistralai import Mistral
