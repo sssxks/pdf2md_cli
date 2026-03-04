@@ -1,6 +1,6 @@
 ## 2md
 
-Convert one or more documents/images to Markdown using **Mistral OCR**.
+Convert one or more documents/images to Markdown using **Mistral OCR** or **GLM OCR**.
 
 ### Install (uv)
 
@@ -28,6 +28,7 @@ Set your API key:
 
 ```bash
 setx MISTRAL_API_KEY "YOUR_KEY"
+setx BIGMODEL_API_KEY "YOUR_KEY"
 ```
 
 Run:
@@ -41,6 +42,7 @@ Run:
 2md docs\\*.png --workers 4
 2md path\\to\\file.pdf -o out
 2md path\\to\\file.pdf --model mistral-ocr-latest
+2md path\\to\\file.pdf --backend glm --model glm-ocr
 2md path\\to\\file.pdf --keep-remote-file
 2md path\\to\\file.pdf                      # default: --table-format html (extract + inline; no tbl-*.html files)
 2md path\\to\\file.pdf --table-format markdown
@@ -102,6 +104,12 @@ Supported image formats:
 - HEIC/HEIF (`.heic`, `.heif`)
 - BMP (`.bmp`)
 - WebP (`.webp`)
+
+Backend notes:
+
+- `--backend mistral` (default): set `MISTRAL_API_KEY`.
+- `--backend glm`: set `BIGMODEL_API_KEY` (or `ZHIPUAI_API_KEY`).
+- `--backend mock`: hidden test backend, only available when `PDF2MD_ENABLE_MOCK=1`.
 
 Retries and backoff:
 

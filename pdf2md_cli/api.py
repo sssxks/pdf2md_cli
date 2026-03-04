@@ -4,16 +4,15 @@ import concurrent.futures
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Sequence
 
-from pdf2md_cli.backends.mistral import make_mistral_runner
-from pdf2md_cli.feature_flags import mock_backend_enabled
+from pdf2md_cli.backends.registry import backend_default_model, make_backend_runner
 from pdf2md_cli.inputs import expand_inputs, validate_input_paths
 from pdf2md_cli.pipeline import ConvertResult, OcrRunner, convert_file_to_markdown
 from pdf2md_cli.retry import BackoffConfig
 from pdf2md_cli.types import HeaderFooterMode, NO_PROGRESS, Progress, ProgressFn, TableFormat
 
-DEFAULT_OCR_MODEL = "mistral-ocr-latest"
+DEFAULT_OCR_MODEL = backend_default_model("mistral")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +51,7 @@ def resolve_api_key(api_key: str | None) -> str:
 
 def make_runner(
     *,
-    backend: Literal["mistral", "mock"] = "mistral",
+    backend: str = "mistral",
     api_key: str | None = None,
     backoff: BackoffConfig = BackoffConfig(),
     mock: object | None = None,
@@ -60,23 +59,11 @@ def make_runner(
     """
     Build an OCR runner compatible with `convert_file_to_markdown`.
 
-    Notes:
-      - For `backend="mistral"`, `api_key` is required (or MISTRAL_API_KEY env var).
-      - For `backend="mock"`, the feature flag must be enabled with PDF2MD_ENABLE_MOCK=1.
+    Backend-specific API key env vars:
+      - mistral: MISTRAL_API_KEY
+      - glm: BIGMODEL_API_KEY (fallback: ZHIPUAI_API_KEY)
     """
-
-    if backend == "mistral":
-        return make_mistral_runner(api_key=resolve_api_key(api_key), backoff=backoff)
-
-    if backend == "mock":
-        if not mock_backend_enabled():
-            raise ValueError('mock backend is disabled (set env var PDF2MD_ENABLE_MOCK=1 to enable).')
-        from pdf2md_cli.backends.mock import MockConfig, make_mock_runner
-
-        mock_cfg = mock if isinstance(mock, MockConfig) else MockConfig()
-        return make_mock_runner(mock=mock_cfg, backoff=backoff)
-
-    raise ValueError(f"Unsupported backend: {backend!r}")
+    return make_backend_runner(backend=backend, api_key=api_key, backoff=backoff, mock=mock)
 
 
 def _progress_sink(progress: Progress | ProgressFn | None) -> Progress:
@@ -101,7 +88,7 @@ def convert_file(
     input_file: str | Path,
     *,
     outdir: str | Path | None = None,
-    backend: Literal["mistral", "mock"] = "mistral",
+    backend: str = "mistral",
     api_key: str | None = None,
     keep_remote_file: bool = False,
     backoff: BackoffConfig = BackoffConfig(),
@@ -140,7 +127,7 @@ def convert_files(
     inputs: Sequence[str | Path],
     *,
     outdir: str | Path | None = None,
-    backend: Literal["mistral", "mock"] = "mistral",
+    backend: str = "mistral",
     api_key: str | None = None,
     keep_remote_file: bool = False,
     backoff: BackoffConfig = BackoffConfig(),

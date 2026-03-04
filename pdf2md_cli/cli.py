@@ -10,14 +10,13 @@ from pathlib import Path
 from typing import NoReturn
 
 from pdf2md_cli.api import ConvertOptions, convert_file, convert_files
-from pdf2md_cli.auth import error, load_api_key
+from pdf2md_cli.auth import error, load_api_key_for_backend
+from pdf2md_cli.backends.registry import backend_choices, backend_default_model, get_backend_spec
 from pdf2md_cli.feature_flags import mock_backend_enabled
 from pdf2md_cli.inputs import expand_inputs, validate_input_paths
 from pdf2md_cli.retry import BackoffConfig
 from pdf2md_cli.types import HeaderFooterMode, Progress, TableFormat
 from pdf2md_cli.ui import Spinner
-
-DEFAULT_OCR_MODEL = "mistral-ocr-latest"
 
 _TABLE_HELP = """\
 Table behavior (Mistral OCR):
@@ -165,11 +164,14 @@ class _FriendlyArgumentParser(argparse.ArgumentParser):
 
 
 def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
-    enable_mock = mock_backend_enabled()
+    available_backends = backend_choices()
+    model_help_default = ", ".join(
+        f"{name}={backend_default_model(name)}" for name in available_backends if name != "mock"
+    )
     parser = _FriendlyArgumentParser(
         prog="2md",
         formatter_class=argparse.RawTextHelpFormatter,
-        description="Convert documents/images to Markdown using Mistral OCR.",
+        description="Convert documents/images to Markdown using OCR backends (mistral/glm).",
         epilog=(
             "Examples:\n"
             "  2md file.pdf\n"
@@ -212,7 +214,7 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
     backend_group = parser.add_argument_group("Backend")
     backend_group.add_argument(
         "--backend",
-        choices=(["mistral", "mock"] if enable_mock else ["mistral"]),
+        choices=available_backends,
         default="mistral",
         help="OCR backend to use (default: mistral)",
     )
@@ -220,12 +222,15 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
         "--api-key",
         dest="api_key",
         default=None,
-        help="Mistral API key (or set MISTRAL_API_KEY env var); required for --backend mistral",
+        help=(
+            "Backend API key; env vars by backend: mistral=MISTRAL_API_KEY, "
+            "glm=BIGMODEL_API_KEY (or ZHIPUAI_API_KEY)"
+        ),
     )
     backend_group.add_argument(
         "--model",
-        default=DEFAULT_OCR_MODEL,
-        help=f"OCR model to use (default: {DEFAULT_OCR_MODEL})",
+        default=None,
+        help=f"OCR model to use (backend default if omitted: {model_help_default})",
     )
     backend_group.add_argument(
         "--keep-remote-file",
@@ -326,7 +331,7 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
             ),
         )
 
-        if enable_mock:
+        if "mock" in available_backends:
             mock_group = parser.add_argument_group("Mock backend (advanced)")
             mock_group.add_argument(
                 "--mock-pages",
@@ -372,7 +377,7 @@ def _build_parser(*, advanced: bool) -> argparse.ArgumentParser:
             help=argparse.SUPPRESS,
         )
 
-        if enable_mock:
+        if "mock" in available_backends:
             parser.add_argument("--mock-pages", type=int, default=1, help=argparse.SUPPRESS)
             parser.add_argument("--mock-images", type=int, default=1, help=argparse.SUPPRESS)
             parser.add_argument("--mock-delay-ms", type=int, default=0, help=argparse.SUPPRESS)
@@ -405,6 +410,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--backoff-multiplier must be > 0")
     if not (0.0 <= args.backoff_jitter <= 1.0):
         raise ValueError("--backoff-jitter must be between 0 and 1")
+    spec = get_backend_spec(args.backend)
+    if not spec.available:
+        raise ValueError(f"backend {args.backend!r} is currently unavailable")
     if args.backend == "mock":
         if not mock_backend_enabled():
             raise ValueError('mock backend is disabled (set env var PDF2MD_ENABLE_MOCK=1 to enable)')
@@ -467,14 +475,12 @@ def main(argv: list[str] | None = None) -> None:
         jitter=args.backoff_jitter,
     )
 
-    api_key: str | None = None
-    if args.backend == "mistral":
-        api_key = load_api_key(args.api_key)
+    api_key = load_api_key_for_backend(args.backend, args.api_key)
 
     parsed_table_format = TableFormat(args.table_format)
 
     options = ConvertOptions(
-        model=args.model,
+        model=args.model or backend_default_model(args.backend),
         table_format=parsed_table_format,
         extract_table=bool(args.extract_table),
         header=header_mode,
